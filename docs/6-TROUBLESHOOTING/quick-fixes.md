@@ -274,7 +274,7 @@ df -h
 
 ```bash
 # In .env, reduce concurrency:
-SURREAL_COMMANDS_MAX_TASKS=2
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=2
 
 # Then restart:
 docker compose restart

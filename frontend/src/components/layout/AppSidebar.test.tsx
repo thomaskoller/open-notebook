@@ -5,6 +5,14 @@ import { usePathname } from 'next/navigation'
 import { AppSidebar } from './AppSidebar'
 import { useSidebarStore } from '@/lib/stores/sidebar-store'
 
+// JobsIndicator polls the jobs API through react-query; stub the hook so this
+// suite stays about the sidebar and needs no QueryClientProvider.
+vi.mock('@/lib/hooks/use-jobs', () => ({
+  useActiveJobs: () => ({ jobs: [], activeJobs: [], activeCount: 0, isLoading: false }),
+  useJobs: () => ({ jobs: [], activeJobs: [], activeCount: 0, isLoading: false }),
+  useCancelJob: () => ({ mutate: vi.fn(), isPending: false }),
+}))
+
 // Mock Tooltip components to avoid Radix UI async issues in tests
 vi.mock('@/components/ui/tooltip', () => ({
   TooltipProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,

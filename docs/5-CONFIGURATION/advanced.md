@@ -9,10 +9,10 @@ Performance tuning, debugging, and advanced features.
 ### Concurrency Control
 
 ```env
-# Max concurrent database operations (default: 5)
-# Increase: Faster processing, more conflicts
+# Max background tasks the Celery worker runs at once (default: 5)
+# Increase: Faster processing, more database conflicts
 # Decrease: Slower, fewer conflicts
-SURREAL_COMMANDS_MAX_TASKS=5
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=5
 ```
 
 **Guidelines:**
@@ -22,20 +22,23 @@ SURREAL_COMMANDS_MAX_TASKS=5
 
 Higher concurrency = more throughput but more database conflicts (retries handle this).
 
+Read at worker launch, so export it in your shell (or set it under `environment:`
+in `docker-compose.yml`) — a value only in `.env` will not apply. The worker uses
+Celery's threads pool, so raising this does not multiply memory the way the
+prefork pool would.
+
 ### Retry Strategy
 
-```env
-# How to wait between retries
-SURREAL_COMMANDS_RETRY_WAIT_STRATEGY=exponential_jitter
+Retry policy is **declared per task in code**, not by environment variable,
+because the right policy differs per task: `process_source` retries up to 15
+times with exponential-jitter backoff to outlast SurrealDB transaction
+conflicts, while `generate_podcast` never retries because a retry would produce
+a duplicate episode (and a second round of TTS spend). Validation and
+configuration errors are never retried.
 
-# Options:
-# - exponential_jitter (recommended)
-# - exponential
-# - fixed
-# - random
-```
-
-For high-concurrency deployments, use `exponential_jitter` to prevent thundering herd.
+To change a budget, edit the task's `@async_task(...)` options in
+`commands/*.py`. See
+[ADR-009](../7-DEVELOPMENT/decisions/ADR-009-celery-queue.md).
 
 ### Timeout Tuning
 
@@ -313,14 +316,11 @@ SURREAL_NAMESPACE
 SURREAL_DATABASE
 ```
 
-### Performance
+### Job Queue
 ```env
-SURREAL_COMMANDS_MAX_TASKS
-SURREAL_COMMANDS_RETRY_ENABLED
-SURREAL_COMMANDS_RETRY_MAX_ATTEMPTS
-SURREAL_COMMANDS_RETRY_WAIT_STRATEGY
-SURREAL_COMMANDS_RETRY_WAIT_MIN
-SURREAL_COMMANDS_RETRY_WAIT_MAX
+REDIS_URL                       # Celery broker (required)
+OPEN_NOTEBOOK_WORKER_MAX_TASKS  # Worker concurrency
+FLOWER_BASIC_AUTH               # Credentials for the monitoring UI
 ```
 
 ### API Settings
@@ -380,7 +380,7 @@ python -c "import os; print(os.getenv('SURREAL_URL'))"
 
 ```env
 # Reduce concurrency
-SURREAL_COMMANDS_MAX_TASKS=2
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=2
 
 # Reduce TTS batch size
 TTS_BATCH_SIZE=1
@@ -389,11 +389,11 @@ TTS_BATCH_SIZE=1
 ### High CPU Usage
 
 ```env
-# Check worker count
-SURREAL_COMMANDS_MAX_TASKS
+# Check worker concurrency
+OPEN_NOTEBOOK_WORKER_MAX_TASKS
 
 # Reduce if maxed out:
-SURREAL_COMMANDS_MAX_TASKS=5
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=5
 ```
 
 ### Slow Responses
@@ -401,20 +401,22 @@ SURREAL_COMMANDS_MAX_TASKS=5
 ```env
 # Check timeout settings
 API_CLIENT_TIMEOUT=300
-
-# Check retry config
-SURREAL_COMMANDS_RETRY_MAX_ATTEMPTS=3
 ```
+
+Open Flower (`make flower`, http://127.0.0.1:5555) to see whether jobs are
+queued, running or retrying — a growing queue means the worker is the
+bottleneck, while a high retry count points at the provider.
 
 ### Database Conflicts
 
 ```env
 # Reduce concurrency
-SURREAL_COMMANDS_MAX_TASKS=3
-
-# Use jitter strategy
-SURREAL_COMMANDS_RETRY_WAIT_STRATEGY=exponential_jitter
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=3
 ```
+
+Conflicts are already retried with exponential-jitter backoff (up to 15 attempts
+for source processing), so they normally resolve themselves; lowering
+concurrency reduces how often they happen at all.
 
 ---
 

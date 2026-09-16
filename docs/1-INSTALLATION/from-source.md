@@ -50,13 +50,16 @@ uv sync
 
 > **Note**: Installing `uv` inside your Conda environment ensures that commands like `make start-all` and `make api` continue to work seamlessly.
 
-### 3. Start SurrealDB
+### 3. Start SurrealDB and Redis
 
 ```bash
 # Terminal 1
-make database
-# or: docker compose up surrealdb
+make database && make redis
+# or: docker compose up surrealdb redis
 ```
+
+Redis is the Celery broker for background jobs. Without it, source processing,
+embeddings and podcast generation queue forever with no error.
 
 ### 4. Set Environment Variables
 
@@ -64,6 +67,7 @@ make database
 cp .env.example .env
 # Edit .env and set:
 # OPEN_NOTEBOOK_ENCRYPTION_KEY=my-secret-key
+# REDIS_URL=redis://localhost:6379/0
 ```
 
 After starting the app, configure AI providers via the **Manage → Models** UI in the browser.
@@ -85,11 +89,24 @@ source stays stuck at `Source processing status: CommandStatus.NEW` forever.
 ```bash
 # Terminal 3
 make worker
-# or: uv run --env-file .env surreal-commands-worker --import-modules commands
+# or: uv run --env-file .env celery -A open_notebook.celery_app:celery worker --pool=threads --concurrency=5
 ```
 
-> `make start-all` starts Database + API + Worker + Frontend together; the steps
-> above run them individually so you can see each process's logs.
+The startup banner lists the 8 registered `open_notebook.*` tasks — if it lists
+none, the worker cannot import the `commands` package.
+
+> `make start-all` starts Database + Redis + API + Worker + Frontend together;
+> the steps above run them individually so you can see each process's logs.
+
+### 6.1 Optional: Watch the queue
+
+```bash
+# Terminal 3b
+make flower
+```
+
+Flower (http://127.0.0.1:5555) shows queue depth, in-flight tasks, retries and
+worker health — the first place to look when a job appears to do nothing.
 
 ### 7. Start Frontend
 
@@ -103,6 +120,7 @@ cd frontend && npm install && npm run dev
 - **Frontend**: http://localhost:3000
 - **API Docs**: http://localhost:5055/docs
 - **Database**: http://localhost:8000
+- **Job monitoring (Flower)**: http://127.0.0.1:5555 (when running)
 
 ### 9. Configure AI Provider
 

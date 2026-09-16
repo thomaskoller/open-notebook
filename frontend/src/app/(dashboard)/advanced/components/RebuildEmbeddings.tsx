@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useState, useMemo } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -17,7 +17,8 @@ import {
   AccordionTrigger,
 } from '@/components/ui/accordion'
 import { embeddingApi } from '@/lib/api/embedding'
-import type { RebuildEmbeddingsRequest, RebuildStatusResponse } from '@/lib/api/embedding'
+import type { RebuildEmbeddingsRequest } from '@/lib/api/embedding'
+import { useJobs } from '@/lib/hooks/use-jobs'
 import { useTranslation } from '@/lib/hooks/use-translation'
 
 export function RebuildEmbeddings() {
@@ -26,59 +27,44 @@ export function RebuildEmbeddings() {
   const [includeSources, setIncludeSources] = useState(true)
   const [includeNotes, setIncludeNotes] = useState(true)
   const [includeInsights, setIncludeInsights] = useState(true)
-  const [commandId, setCommandId] = useState<string | null>(null)
-  const [status, setStatus] = useState<RebuildStatusResponse | null>(null)
-  const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null)
+  const [dismissedId, setDismissedId] = useState<string | null>(null)
 
-  // Rebuild mutation
+  // A rebuild outlives this component: it used to live in a local setInterval,
+  // so navigating away and back lost the run entirely. Adopt whatever rebuild
+  // the server says is in flight instead of remembering it here - that also
+  // picks up a rebuild started in another tab.
+  const queryClient = useQueryClient()
+  const { jobs } = useJobs({ recent: true, limit: 25 })
+  const serverCommandId = useMemo(() => {
+    const job = jobs.find((j) => j.command === 'rebuild_embeddings')
+    return job && job.job_id !== dismissedId ? job.job_id : null
+  }, [jobs, dismissedId])
+
   const rebuildMutation = useMutation({
     mutationFn: async (request: RebuildEmbeddingsRequest) => {
       return embeddingApi.rebuildEmbeddings(request)
     },
-    onSuccess: (data) => {
-      setCommandId(data.command_id)
-      // Start polling for status
-      startPolling(data.command_id)
-    }
+    onSuccess: () => {
+      // Wake the jobs poll: it stops entirely while the queue is empty (see
+      // jobsRefetchInterval), so the rebuild would not reach the sidebar
+      // indicator until some unrelated refetch happened.
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    },
   })
 
-  // Start polling for rebuild status
-  const startPolling = (cmdId: string) => {
-    if (pollingInterval) {
-      clearInterval(pollingInterval)
-    }
+  const commandId = rebuildMutation.data?.command_id ?? serverCommandId
 
-    const interval = setInterval(async () => {
-      try {
-        const statusData = await embeddingApi.getRebuildStatus(cmdId)
-        setStatus(statusData)
-
-        // Stop polling if completed or failed
-        if (statusData.status === 'completed' || statusData.status === 'failed') {
-          stopPolling()
-        }
-      } catch (error) {
-        console.error('Failed to fetch rebuild status:', error)
-      }
-    }, 5000) // Poll every 5 seconds
-
-    setPollingInterval(interval)
-  }
-
-  // Stop polling
-  const stopPolling = useCallback(() => {
-    if (pollingInterval) {
-      clearInterval(pollingInterval)
-      setPollingInterval(null)
-    }
-  }, [pollingInterval])
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stopPolling()
-    }
-  }, [stopPolling])
+  const { data: status = null } = useQuery({
+    queryKey: ['embeddings', 'rebuild', commandId],
+    queryFn: () => embeddingApi.getRebuildStatus(commandId as string),
+    enabled: !!commandId,
+    staleTime: 0,
+    refetchInterval: (current) => {
+      const data = current.state.data
+      if (!data) return 5000
+      return data.status === 'completed' || data.status === 'failed' ? false : 5000
+    },
+  })
 
   const handleStartRebuild = () => {
     const request: RebuildEmbeddingsRequest = {
@@ -92,9 +78,9 @@ export function RebuildEmbeddings() {
   }
 
   const handleReset = () => {
-    stopPolling()
-    setCommandId(null)
-    setStatus(null)
+    // Hide the finished run without deleting its job record - the jobs drawer
+    // keeps showing it.
+    if (commandId) setDismissedId(commandId)
     rebuildMutation.reset()
   }
 

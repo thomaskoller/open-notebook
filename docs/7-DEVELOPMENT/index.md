@@ -120,7 +120,6 @@ Don't be shy! We're here to help new contributors succeed.
 ### Our Libraries
 - [Esperanto](https://github.com/lfnovo/esperanto) - Multi-provider AI abstraction
 - [Content Core](https://github.com/lfnovo/content-core) - Content processing
-- [Podcast Creator](https://github.com/lfnovo/podcast-creator) - Podcast generation
 
 ---
 

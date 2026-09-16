@@ -373,6 +373,13 @@
     @apply antialiased;
   }
 
+  /* Hairline scrollbars to match the rest of the chrome. Radix ScrollArea
+     hides the native bar and draws its own, so it is unaffected. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
   body {
     @apply bg-background text-foreground transition-colors;
   }

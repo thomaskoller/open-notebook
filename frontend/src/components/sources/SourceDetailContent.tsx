@@ -168,6 +168,10 @@ function SourceDetailContentInner({
       const response = await insightsApi.create(sourceId, {
         transformation_id: selectedTransformation
       })
+      // Wake the jobs poll: it stops entirely while the queue is empty (see
+      // jobsRefetchInterval), so this job is invisible until something
+      // invalidates this key.
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
       // Show toast for async operation
       toast.success(t('sources.insightGenerationStarted'))
       setSelectedTransformation('')
@@ -178,14 +182,25 @@ function SourceDetailContentInner({
         insightsApi.waitForCommand(response.command_id, {
           maxAttempts: 120, // Up to 4 minutes (120 * 2s)
           intervalMs: 2000
-        }).then(success => {
-          if (success) {
+        }).then(result => {
+          if (result.outcome === 'completed') {
             void fetchInsights()
             // Invalidate sources queries so notebook page refreshes with updated insights_count
             queryClient.invalidateQueries({ queryKey: ['sources'] })
+            return
+          }
+          // A silent failure here used to look identical to success: the
+          // "generation started" toast was the last thing the user ever saw.
+          if (result.outcome === 'failed') {
+            toast.error(t('sources.insightGenerationFailed'), {
+              description: result.errorMessage,
+            })
+          } else {
+            toast.warning(t('sources.insightGenerationTimedOut'))
           }
         }).catch(err => {
           console.error('Error waiting for insight command:', err)
+          toast.error(t('sources.insightGenerationFailed'))
         })
       } else {
         // Fallback: refresh after delay if no command_id

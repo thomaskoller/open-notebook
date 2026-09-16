@@ -157,25 +157,36 @@ probe_test() {
 
   # #1141: OPEN_NOTEBOOK_WORKER_MAX_TASKS must reach the worker. supervisord's
   # command= does not run through a shell, so the value is only honored if the
-  # command is wrapped in `sh -c`. Boot with the var set and a dead DB (the
-  # worker logs its configured concurrency before it ever connects), then read
-  # the value back from its startup log.
+  # command is wrapped in `sh -c`. Boot with the var set and dead DB/broker
+  # (Celery prints its startup banner before connecting to either), then read
+  # the concurrency back out of that banner.
   local CID
   CID=$(docker run -d --rm \
     -e OPEN_NOTEBOOK_WORKER_MAX_TASKS=2 \
     -e SURREAL_URL=ws://127.0.0.1:9/rpc \
+    -e REDIS_URL=redis://127.0.0.1:9/0 \
     -e OPEN_NOTEBOOK_ENCRYPTION_KEY=probe \
     "$NEW_IMAGE" 2>/dev/null)
   if [ -z "$CID" ]; then
     bad "worker-concurrency probe: container did not start"
   else
-    local CONC=""
+    local CONC="" POOL=""
     for i in $(seq 1 20); do
-      CONC=$(docker logs "$CID" 2>&1 | grep -oiE "up to [0-9]+ concurrent tasks" | grep -oE "[0-9]+" | head -1)
+      # Celery banner line: ".> concurrency: 2 (thread)"
+      CONC=$(docker logs "$CID" 2>&1 | grep -oE "concurrency: [0-9]+" | grep -oE "[0-9]+" | head -1)
       [ -n "$CONC" ] && break
       sleep 3
     done
     check "OPEN_NOTEBOOK_WORKER_MAX_TASKS honored by the in-image worker" "2" "$CONC"
+    # The threads pool is load-bearing: prefork would fork N copies of the
+    # ML/extraction import footprint (ADR-009).
+    POOL=$(docker logs "$CID" 2>&1 | grep -oE "concurrency: [0-9]+ \(thread\)" | head -1)
+    if [ -n "$POOL" ]; then ok "in-image worker uses the threads pool"; else
+      bad "in-image worker is not using --pool=threads"; fi
+    # All 8 tasks must be registered, or jobs are published and never consumed.
+    local NTASKS
+    NTASKS=$(docker logs "$CID" 2>&1 | grep -cE "^  \. open_notebook\.")
+    check "in-image worker registers all tasks" "8" "$NTASKS"
     docker rm -f "$CID" >/dev/null 2>&1
   fi
 

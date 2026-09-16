@@ -16,7 +16,7 @@ Applied today:
 
 - **[Esperanto](https://github.com/lfnovo/esperanto)** — all model access (LLM, embeddings, TTS, STT) through one `AIFactory` interface. Application code selects models via the `Model` registry and `provision_langchain_model()`, never by instantiating provider clients directly.
 - **[Content Core](https://github.com/lfnovo/content-core)** — all content extraction (files, URLs, media) through `extract_content()`.
-- The same rule covers **[podcast-creator](https://github.com/lfnovo/podcast-creator)** for audio generation.
+- Podcast generation is the documented exception: its orchestration moved in-repo (see [ADR-010](ADR-010-own-podcast-pipeline.md)) because what it delegated was prompt content and control flow, not platform integration. Model access there still goes through Esperanto.
 
 ## Alternatives considered
 

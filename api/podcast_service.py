@@ -3,8 +3,8 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from loguru import logger
 from pydantic import BaseModel
-from surreal_commands import get_command_status, submit_command
 
+from api.command_service import CommandService
 from open_notebook.domain.notebook import Notebook
 from open_notebook.podcasts.models import EpisodeProfile, PodcastEpisode, SpeakerProfile
 
@@ -85,21 +85,11 @@ class PodcastService:
                 "briefing_suffix": briefing_suffix,
             }
 
-            # Ensure command modules are imported before submitting
-            # This is needed because submit_command validates against local registry
-            try:
-                import commands.podcast_commands  # noqa: F401
-            except ImportError as import_err:
-                logger.error(f"Failed to import podcast commands: {import_err}")
-                raise ValueError("Podcast commands not available")
-
-            # Submit command to surreal-commands
-            job_id = submit_command("open_notebook", "generate_podcast", command_args)
-
-            # Convert RecordID to string if needed
-            if not job_id:
-                raise ValueError("Failed to get job_id from submit_command")
-            job_id_str = str(job_id)
+            # Dispatch is by task name over the broker, so the API process
+            # does not need the task modules imported.
+            job_id_str = await CommandService.submit_command_job(
+                "open_notebook", "generate_podcast", command_args
+            )
             logger.info(
                 f"Submitted podcast generation job: {job_id_str} for episode '{episode_name}'"
             )
@@ -116,22 +106,7 @@ class PodcastService:
     async def get_job_status(job_id: str) -> Dict[str, Any]:
         """Get status of a podcast generation job"""
         try:
-            status = await get_command_status(job_id)
-            return {
-                "job_id": job_id,
-                "status": status.status if status else "unknown",
-                "result": status.result if status else None,
-                "error_message": getattr(status, "error_message", None)
-                if status
-                else None,
-                "created": str(status.created)
-                if status and hasattr(status, "created") and status.created
-                else None,
-                "updated": str(status.updated)
-                if status and hasattr(status, "updated") and status.updated
-                else None,
-                "progress": getattr(status, "progress", None) if status else None,
-            }
+            return await CommandService.get_command_status(job_id)
         except Exception as e:
             logger.error(f"Failed to get podcast job status: {e}")
             raise HTTPException(status_code=500, detail="Failed to get job status")

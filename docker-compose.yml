@@ -1,20 +1,82 @@
+# Open Notebook — one container per process.
+#
+# The image bundles api + worker + frontend behind supervisord (see
+# supervisord.conf); this file bypasses that by giving each service the single
+# command it should run, so they scale, restart and log independently.
+#
+#   api       FastAPI on 5055 — also runs the schema migrations on startup
+#   worker    Celery — source processing, embeddings, podcasts (nothing async
+#             happens without it)
+#   frontend  Next.js on 8502 — the UI
+#   flower    Celery monitoring UI on 5555
+#
+# api, worker and flower are the same image with the same environment and only
+# differ by `command`, so they share the x-open-notebook template below. api and
+# worker also share ./notebook_data: the API writes uploads there and the worker
+# reads them back, so the two must always see the same directory. (Flower needs
+# only REDIS_URL; it inherits the rest harmlessly.)
+
+x-open-notebook: &open-notebook
+  # Both variants of the image work; `single` additionally bundles SurrealDB,
+  # which the surrealdb service below already provides.
+  image: dockerhub.home/open_notebook:latest
+  environment: &open-notebook-env
+    # REQUIRED: Change this to your own secret string
+    # This encrypts your API keys in the database
+    OPEN_NOTEBOOK_ENCRYPTION_KEY: change-me-to-a-secret-string
+
+    # Database connection. SURREAL_USER / SURREAL_PASSWORD default to root:root
+    # for local use; override them in a .env file before exposing the instance
+    # (the same values configure the surrealdb service below).
+    SURREAL_URL: ws://surrealdb:8000/rpc
+    SURREAL_USER: ${SURREAL_USER:-root}
+    SURREAL_PASSWORD: ${SURREAL_PASSWORD:-root}
+    SURREAL_NAMESPACE: open_notebook
+    SURREAL_DATABASE: open_notebook
+
+    # Celery broker + result backend. Background jobs (source processing,
+    # embeddings, podcasts) silently never run without this reachable.
+    REDIS_URL: redis://redis:6379/0
+
+    # Max concurrent background tasks (default 5). Set to 1 for sequential
+    # processing on single-GPU / local LLM setups, to avoid overloading the
+    # model with parallel requests. Read at worker launch: restart to apply.
+    OPEN_NOTEBOOK_WORKER_MAX_TASKS: ${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}
+
+    # OPTIONAL: heavy extraction runtimes, installed on first startup when
+    # enabled (downloads are cached on the ./notebook_data volume, so only the
+    # first boot is slow). See docs/5-CONFIGURATION/environment-reference.md.
+    #
+    # The runtime is installed per container, so this costs one install in the
+    # worker (which processes sources) and one in the API (which reports it as
+    # available via GET /api/capabilities — the UI gates the engine options on
+    # that). The second comes from the shared cache, so it is quick.
+    # OPEN_NOTEBOOK_ENABLE_DOCLING: "true"    # Docling engine + OCR + image sources (large ML stack)
+    # OPEN_NOTEBOOK_ENABLE_CRAWL4AI: "true"   # local Crawl4AI (bundles a Chromium browser)
+    # CRAWL4AI_API_URL: http://crawl4ai:11235  # use a remote Crawl4AI server instead (no local install)
+    # CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN}  # bearer token for that server (required by Crawl4AI >= 0.9.0)
+  volumes:
+    - ./notebook_data:/app/data
+  restart: always
+  pull_policy: always
+
 services:
   surrealdb:
     image: surrealdb/surrealdb:v2
     # Credentials default to root:root for a zero-config local setup. Before
     # exposing this instance to a network, set SURREAL_USER / SURREAL_PASSWORD
-    # in a .env file (see .env.example) — they are applied here and to the
-    # open_notebook service below, so the two always stay in sync.
+    # in a .env file (see .env.example) — they are applied here and to the app
+    # services above, so the two always stay in sync.
     # List (exec) form so each interpolated value stays a single argument —
     # a password containing spaces would otherwise be split into several.
-    command: ["start", "--log", "info", "--user", "${SURREAL_USER:-root}", "--pass", "${SURREAL_PASSWORD:-root}", "rocksdb:/mydata/mydatabase.db"]
+    command: [ "start", "--log", "info", "--user", "${SURREAL_USER:-root}", "--pass", "${SURREAL_PASSWORD:-root}", "rocksdb:/mydata/mydatabase.db" ]
     user: root  # Required for bind mounts on Linux
     ports:
-      # Bound to localhost only: the open_notebook service reaches this over
-      # the internal compose network regardless, so the host port is purely
-      # for local debugging (e.g. Surrealist, `surreal sql`). Exposing this
-      # on 0.0.0.0 would let anyone who can reach the host connect with the
-      # default root:root credentials.
+      # Bound to localhost only: the app services reach this over the internal
+      # compose network regardless, so the host port is purely for local
+      # debugging (e.g. Surrealist, `surreal sql`). Exposing this on 0.0.0.0
+      # would let anyone who can reach the host connect with the default
+      # root:root credentials.
       - "127.0.0.1:8000:8000"
     volumes:
       - ./surreal_data:/mydata
@@ -23,40 +85,107 @@ services:
     restart: always
     pull_policy: always
 
-  open_notebook:
-    image: lfnovo/open_notebook:v1-latest
+  redis:
+    image: redis:8-alpine
+    # Broker + result backend for the Celery worker. Jobs are re-submittable
+    # and their real state lives in SurrealDB, so persistence is off: a Redis
+    # restart loses at most the in-flight queue, not any user data.
+    command: [ "redis-server", "--save", "", "--appendonly", "no" ]
     ports:
-      - "8502:8502"  # Web UI
-      - "5055:5055"  # REST API
-    environment:
-      # REQUIRED: Change this to your own secret string
-      # This encrypts your API keys in the database
-      - OPEN_NOTEBOOK_ENCRYPTION_KEY=change-me-to-a-secret-string
+      # Localhost only - the app services reach it over the compose network.
+      - "127.0.0.1:6379:6379"
+    restart: always
+    pull_policy: always
 
-      # Database connection. SURREAL_USER / SURREAL_PASSWORD default to root:root
-      # for local use; override them in a .env file before exposing the instance
-      # (the same values configure the surrealdb service above).
-      - SURREAL_URL=ws://surrealdb:8000/rpc
-      - SURREAL_USER=${SURREAL_USER:-root}
-      - SURREAL_PASSWORD=${SURREAL_PASSWORD:-root}
-      - SURREAL_NAMESPACE=open_notebook
-      - SURREAL_DATABASE=open_notebook
-
-      # OPTIONAL: heavy extraction runtimes, installed on first startup when
-      # enabled (downloads are cached on the ./notebook_data volume, so only the
-      # first boot is slow). See docs/5-CONFIGURATION/environment-reference.md.
-      # - OPEN_NOTEBOOK_ENABLE_DOCLING=true    # Docling engine + OCR + image sources (large ML stack)
-      # - OPEN_NOTEBOOK_ENABLE_CRAWL4AI=true   # local Crawl4AI (bundles a Chromium browser)
-      # - CRAWL4AI_API_URL=http://crawl4ai:11235  # use a remote Crawl4AI server instead (no local install)
-      # - CRAWL4AI_API_TOKEN=${CRAWL4AI_API_TOKEN}  # bearer token for that server (required by Crawl4AI >= 0.9.0)
-
-      # OPTIONAL: max concurrent background tasks the worker processes at once
-      # (default 5). Set to 1 for sequential processing on single-GPU / local
-      # LLM setups to avoid overloading the model with parallel requests.
-      # - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
-    volumes:
-      - ./notebook_data:/app/data
+  # REST API. Runs the schema migrations on startup, which is why the worker
+  # and frontend wait for it to report healthy.
+  api:
+    <<: *open-notebook
+    # sh -c so API_HOST stays a knob (set it to :: for IPv6 dual-stack). The
+    # $$ keeps the expansion for the container's shell instead of compose.
+    command: [ "sh", "-c", "uv run --no-sync uvicorn api.main:app --host $${API_HOST:-0.0.0.0} --port 5055" ]
+    ports:
+      - "5055:5055"
+    healthcheck:
+      test: [ "CMD", "curl", "-fs", "http://localhost:5055/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     depends_on:
       - surrealdb
+      - redis
+
+  # Celery worker: source processing, embeddings, podcasts. Without it those
+  # jobs queue forever without any visible error.
+  worker:
+    <<: *open-notebook
+    # --pool=threads on purpose: one process running N concurrent tasks. The
+    # default prefork pool would fork N processes, each holding a full copy of
+    # the ML/extraction import footprint (Docling in particular) — unaffordable
+    # on a small self-hosted box. See ADR-009.
+    command: [ "sh", "-c", "uv run --no-sync celery -A open_notebook.celery_app:celery worker --pool=threads --concurrency=$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5} --loglevel=info" ]
+    depends_on:
+      api:
+        # Migrations run in the API's startup; starting the worker first would
+        # have it querying a schema that does not exist yet.
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # Celery monitoring UI: queue depth, in-flight tasks, retries, worker health.
+  # http://127.0.0.1:5555/flower — FLOWER_URL_PREFIX below moves it off `/`, so
+  # the bare port serves 404s.
+  flower:
+    <<: *open-notebook
+    command: [ "uv", "run", "--no-sync", "celery", "-A", "open_notebook.celery_app:celery", "flower", "--address=0.0.0.0", "--port=5555" ]
+    environment:
+      <<: *open-notebook-env
+      # Flower ships with NO authentication. Published on localhost only
+      # below; set FLOWER_BASIC_AUTH=user:password in a .env file before
+      # exposing it on a network, and note the JSON API additionally needs
+      # FLOWER_UNAUTHENTICATED_API=true if you want it without credentials.
+      FLOWER_BASIC_AUTH: ${FLOWER_BASIC_AUTH:-}
+      FLOWER_URL_PREFIX: flower
+    ports:
+      - "127.0.0.1:5555:5555"
+    depends_on:
+      - redis
+
+  # Next.js UI. Not on the template above: it shares none of the backend
+  # environment and has no business seeing the data volume. API_URL is what the
+  # *browser* uses, so behind a reverse proxy set it to the public origin (see
+  # docs/5-CONFIGURATION/reverse-proxy.md).
+  frontend:
+    image: dockerhub.home/open_notebook:latest
+    working_dir: /app/frontend
+    # HOSTNAME must be forced: container runtimes inject HOSTNAME=<container
+    # hostname>, making Next.js bind to the wrong address (#994). Override with
+    # FRONTEND_BIND_HOST.
+    command: [ "bash", "-c", "/app/scripts/wait-for-api.sh && HOSTNAME=$${FRONTEND_BIND_HOST:-0.0.0.0} node server.js" ]
+    environment:
+      NODE_ENV: production
+      PORT: "8502"
+      # Where the browser calls the API — pointed at the api service's published
+      # port on purpose, NOT at this container.
+      #
+      # The UI cannot proxy /api/* for us: `output: standalone` makes next build
+      # resolve next.config.ts's rewrites() at BUILD time and bake the literal
+      # destination (http://localhost:5055) into .next/routes-manifest.json. The
+      # standalone server reads that manifest and never re-evaluates the config,
+      # so INTERNAL_API_URL cannot move it — and once api is its own container,
+      # nothing listens on the UI container's own localhost:5055.
+      #
+      # Behind a reverse proxy, route /api/* to the api service there instead and
+      # set this to the public origin (see docs/5-CONFIGURATION/reverse-proxy.md).
+      API_URL: http://localhost:5055
+      # Still read at runtime by the two SSE route handlers and by the startup
+      # wait below — unlike the rewrite, those are ordinary process.env reads.
+      INTERNAL_API_URL: http://api:5055
+    ports:
+      - "8502:8502"
+    depends_on:
+      api:
+        condition: service_healthy
     restart: always
     pull_policy: always

@@ -6,16 +6,18 @@ This file holds the project-wide rules every coding session needs. Component rul
 
 ## Stack, ports, startup order
 
-Three tiers: Next.js frontend (3000) → FastAPI (5055) → SurrealDB (8000).
+Three tiers: Next.js frontend (3000) → FastAPI (5055) → SurrealDB (8000), plus Redis (6379) as the Celery broker.
 
 Start in this order — each tier depends on the one below:
 
-1. `make database` — SurrealDB (API fails without it)
+1. `make database` + `make redis` — SurrealDB and the Celery broker (the API fails without SurrealDB; jobs never run without Redis)
 2. `make api` — FastAPI; **schema migrations run automatically on startup** (check logs)
-3. `make worker-start` — surreal-commands worker. **Required**: podcasts, embeddings and source processing are async jobs that silently queue forever without it
+3. `make worker-start` — Celery worker. **Required**: podcasts, embeddings and source processing are async jobs that silently queue forever without it
 4. `make frontend` — UI (depends on the API for all data)
 
 Or all at once: `make start-all` (status: `make status`, stop: `make stop-all`).
+
+`make flower` opens the Celery monitoring UI on http://127.0.0.1:5555 — queue depth, in-flight tasks, retries, worker health. Reach for it first when a job "does nothing".
 
 ## Commands
 

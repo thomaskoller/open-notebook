@@ -57,7 +57,7 @@ async def test_compatible_podcast_model_reaches_its_endpoint(
     ):
         provider, name, config = await getattr(profile, resolver)()
 
-    # Exercise the real factory boundary used by podcast-creator. Construction
+    # Exercise the real factory boundary used by the podcast pipeline. Construction
     # performs no model request; the endpoint must not become api.anthropic.com.
     language_model = AIFactory.create_language(provider, name, config=config)
     assert provider == "anthropic"

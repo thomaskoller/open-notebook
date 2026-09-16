@@ -1,6 +1,5 @@
 from fastapi import APIRouter, HTTPException
 from loguru import logger
-from surreal_commands import get_command_status
 
 from api.command_service import CommandService
 from api.models import (
@@ -30,9 +29,6 @@ async def start_rebuild(request: RebuildRequest):
     """
     try:
         logger.info(f"Starting rebuild request: mode={request.mode}")
-
-        # Import commands to ensure they're registered
-        import commands.embedding_commands  # noqa: F401
 
         # Estimate total items (quick count query)
         # This is a rough estimate before the command runs
@@ -137,23 +133,30 @@ async def get_rebuild_status(command_id: str):
     - **timestamps**: started_at, completed_at
     """
     try:
-        # Get command status from surreal_commands
-        status = await get_command_status(command_id)
+        status = await CommandService.get_command_status(command_id)
 
-        if not status:
+        if status["status"] == "unknown":
             raise HTTPException(status_code=404, detail="Rebuild command not found")
 
-        # Build response based on status
         response = RebuildStatusResponse(
             command_id=command_id,
-            status=status.status,
+            status=status["status"],
         )
 
-        # Extract metadata from command result
-        if status.result and isinstance(status.result, dict):
-            result = status.result
+        # Live progress while the job is still fanning out jobs (published by
+        # the task via report_progress); the completed result supersedes it.
+        live = status.get("progress")
+        if isinstance(live, dict) and live.get("total"):
+            total = live["total"]
+            processed = live.get("current", 0)
+            response.progress = RebuildProgress(
+                processed=processed,
+                total=total,
+                percentage=round((processed / total * 100) if total > 0 else 0, 2),
+            )
 
-            # Build progress info
+        result = status.get("result")
+        if isinstance(result, dict):
             if "total_items" in result and "jobs_submitted" in result:
                 total = result["total_items"]
                 submitted = result["jobs_submitted"]
@@ -163,7 +166,6 @@ async def get_rebuild_status(command_id: str):
                     percentage=round((submitted / total * 100) if total > 0 else 0, 2),
                 )
 
-            # Build stats
             response.stats = RebuildStats(
                 sources=result.get("sources_submitted", 0),
                 notes=result.get("notes_submitted", 0),
@@ -171,19 +173,11 @@ async def get_rebuild_status(command_id: str):
                 failed=result.get("failed_submissions", 0),
             )
 
-        # Add timestamps
-        if hasattr(status, "created") and status.created:
-            response.started_at = str(status.created)
-        if hasattr(status, "updated") and status.updated:
-            response.completed_at = str(status.updated)
+        response.started_at = status.get("created")
+        response.completed_at = status.get("updated")
 
-        # Add error message if failed
-        if (
-            status.status == "failed"
-            and status.result
-            and isinstance(status.result, dict)
-        ):
-            response.error_message = status.result.get("error_message", "Unknown error")
+        if status["status"] == "failed":
+            response.error_message = status.get("error_message") or "Unknown error"
 
         return response
 

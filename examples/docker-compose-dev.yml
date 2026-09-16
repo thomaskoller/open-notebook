@@ -13,6 +13,17 @@ services:
     pull_policy: always
     user: root
     restart: always
+  redis:
+    image: redis:8-alpine
+    # Celery broker + result backend. Persistence off on purpose: job state of
+    # record lives in SurrealDB, so a Redis restart loses at most the in-flight
+    # queue, never user data.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: always
+    pull_policy: always
+
   open_notebook:
     build:
       context: .
@@ -22,9 +33,27 @@ services:
       - "5055:5055"
     env_file:
       - ./docker.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - surrealdb
+      - redis
     volumes:
       - ./notebook_data:/app/data
     restart: always
-    
+
+  # Celery monitoring UI: http://127.0.0.1:5555
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uv", "run", "--no-sync", "celery", "-A", "open_notebook.celery_app:celery", "flower", "--address=0.0.0.0", "--port=5555"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      # Flower has NO auth by default - set before exposing beyond localhost.
+      - FLOWER_BASIC_AUTH=${FLOWER_BASIC_AUTH:-}
+    ports:
+      - "127.0.0.1:5555:5555"
+    depends_on:
+      - redis
+    restart: always

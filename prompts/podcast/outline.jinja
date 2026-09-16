@@ -25,6 +25,11 @@ The podcast will feature the following speakers:
   Personality: {{ speaker.personality }}
 {% endfor %}
 </speakers>
+{% if language %}
+
+IMPORTANT LANGUAGE INSTRUCTION: You MUST generate ALL content in {{ language }}. This includes segment names, descriptions, and all text in your response. Do not use English unless the content itself contains English terms. The entire output must be written in {{ language }}.
+
+{% endif %}
 
 Please create an outline based on this briefing. Your outline should consist of {{ num_segments }} main segments for the podcast episode, along with a description of each segment. Follow these guidelines:
 

@@ -11,34 +11,45 @@ from typing import (
 )
 
 from loguru import logger
-from surreal_commands import CommandInput, CommandOutput, command, submit_command
 
 from open_notebook.ai.models import model_manager
+from open_notebook.celery_app import (
+    TaskInput,
+    TaskOutput,
+    async_task,
+    report_progress,
+    submit_job,
+)
 from open_notebook.database.repository import ensure_record_id, repo_insert, repo_query
 from open_notebook.domain.notebook import Note, Source, SourceInsight
 from open_notebook.exceptions import ConfigurationError, ContextLengthExceededError
 from open_notebook.utils.chunking import ContentType, chunk_text, detect_content_type
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
 
-# NOTE: `stop_on` below can never trigger in practice — each command catches
-# ValueError internally and returns success=False instead of raising, so the
-# retry layer never sees it. Kept as-is on purpose; to be revisited in a
-# dedicated error-handling PR.
-EMBED_RETRY_CONFIG = {
-    "max_attempts": 5,
-    "wait_strategy": "exponential_jitter",
-    "wait_min": 1,
-    "wait_max": 60,
-    "stop_on": [
+# Shared retry options for the embed_* / create_insight tasks: 5 total
+# attempts with exponential-jitter backoff between 1s and 60s. Validation and
+# config errors are permanent - retrying them only burns provider quota.
+#
+# These used to be dead: the commands caught ValueError internally and returned
+# success=False, so the retry layer never saw it AND the job was recorded as
+# `completed` despite having failed. _embed_record now re-raises (see below),
+# which is what makes dont_autoretry_for meaningful.
+EMBED_RETRY_CONFIG: dict = {
+    "autoretry_for": (Exception,),
+    "dont_autoretry_for": (
         ValueError,
         ConfigurationError,
         ContextLengthExceededError,
-    ],  # Don't retry validation/config errors
+    ),
+    "max_retries": 4,
+    "retry_backoff": 1,
+    "retry_backoff_max": 60,
+    "retry_jitter": True,
     "retry_log_level": "warning",
 }
 
 
-def get_command_id(input_data: CommandInput) -> str:
+def get_command_id(input_data: TaskInput) -> str:
     """Extract command_id from input_data's execution context, or return 'unknown'."""
     if input_data.execution_context:
         return str(input_data.execution_context.command_id)
@@ -46,12 +57,12 @@ def get_command_id(input_data: CommandInput) -> str:
 
 
 async def _embed_record(
-    input_data: CommandInput,
+    input_data: TaskInput,
     *,
     kind: str,
     record_id: str,
     embed: Callable[[], Awaitable[Tuple[Dict[str, Any], str]]],
-) -> Tuple[Optional[Dict[str, Any]], float, Optional[str]]:
+) -> Tuple[Dict[str, Any], float]:
     """
     Shared core for the embed_* commands: run the embedding work with the
     common logging and error-handling epilogue.
@@ -64,10 +75,11 @@ async def _embed_record(
             Returns (extra_output_fields, success_log_detail).
 
     Returns:
-        (extra_output_fields, processing_time, error_message)
-        extra_output_fields is None and error_message is set on permanent
-        (ValueError) failure. Transient failures re-raise so the retry layer
-        can handle them.
+        (extra_output_fields, processing_time) on success.
+
+    Raises:
+        ValueError: permanent failure (not retried, job marked `failed`).
+        Exception: transient failure - retried with backoff.
     """
     start_time = time.time()
 
@@ -80,16 +92,17 @@ async def _embed_record(
         logger.info(
             f"Successfully embedded {kind} {record_id}{log_detail} in {processing_time:.2f}s"
         )
-        return extra_fields, processing_time, None
+        return extra_fields, processing_time
 
     except ValueError as e:
-        # Permanent failure - don't retry
-        processing_time = time.time() - start_time
+        # Permanent failure. Re-raise so the job is recorded as `failed`:
+        # returning success=False instead still marks the job `completed`,
+        # because job status - not the payload - is what the UI reads.
         cmd_id = get_command_id(input_data)
         logger.error(f"Failed to embed {kind} {record_id} (command: {cmd_id}): {e}")
-        return None, processing_time, str(e)
+        raise
     except Exception as e:
-        # Transient failure - will be retried (surreal-commands logs final failure)
+        # Transient failure - retried with exponential-jitter backoff
         cmd_id = get_command_id(input_data)
         logger.debug(
             f"Transient error embedding {kind} {record_id} (command: {cmd_id}): {e}"
@@ -98,7 +111,7 @@ async def _embed_record(
 
 
 async def _embed_markdown_record(
-    input_data: CommandInput,
+    input_data: TaskInput,
     *,
     label: str,
     record_id: str,
@@ -135,14 +148,14 @@ async def _embed_markdown_record(
     return {}, ""
 
 
-class RebuildEmbeddingsInput(CommandInput):
+class RebuildEmbeddingsInput(TaskInput):
     mode: Literal["existing", "all"]
     include_sources: bool = True
     include_notes: bool = True
     include_insights: bool = True
 
 
-class RebuildEmbeddingsOutput(CommandOutput):
+class RebuildEmbeddingsOutput(TaskOutput):
     success: bool
     total_items: int
     jobs_submitted: int  # Count of embedding commands submitted
@@ -154,7 +167,7 @@ class RebuildEmbeddingsOutput(CommandOutput):
     error_message: Optional[str] = None
 
 
-class CreateInsightInput(CommandInput):
+class CreateInsightInput(TaskInput):
     """Input for creating a source insight with automatic retry on conflicts."""
 
     source_id: str
@@ -162,7 +175,7 @@ class CreateInsightInput(CommandInput):
     content: str
 
 
-class CreateInsightOutput(CommandOutput):
+class CreateInsightOutput(TaskOutput):
     """Output from insight creation command."""
 
     success: bool
@@ -171,13 +184,13 @@ class CreateInsightOutput(CommandOutput):
     error_message: Optional[str] = None
 
 
-class EmbedNoteInput(CommandInput):
+class EmbedNoteInput(TaskInput):
     """Input for embedding a single note."""
 
     note_id: str
 
 
-class EmbedNoteOutput(CommandOutput):
+class EmbedNoteOutput(TaskOutput):
     """Output from note embedding command."""
 
     success: bool
@@ -186,13 +199,13 @@ class EmbedNoteOutput(CommandOutput):
     error_message: Optional[str] = None
 
 
-class EmbedInsightInput(CommandInput):
+class EmbedInsightInput(TaskInput):
     """Input for embedding a single source insight."""
 
     insight_id: str
 
 
-class EmbedInsightOutput(CommandOutput):
+class EmbedInsightOutput(TaskOutput):
     """Output from insight embedding command."""
 
     success: bool
@@ -201,13 +214,13 @@ class EmbedInsightOutput(CommandOutput):
     error_message: Optional[str] = None
 
 
-class EmbedSourceInput(CommandInput):
+class EmbedSourceInput(TaskInput):
     """Input for embedding a source (creates multiple chunk embeddings)."""
 
     source_id: str
 
 
-class EmbedSourceOutput(CommandOutput):
+class EmbedSourceOutput(TaskOutput):
     """Output from source embedding command."""
 
     success: bool
@@ -217,7 +230,7 @@ class EmbedSourceOutput(CommandOutput):
     error_message: Optional[str] = None
 
 
-@command("embed_note", app="open_notebook", retry=EMBED_RETRY_CONFIG)
+@async_task("embed_note", **EMBED_RETRY_CONFIG)
 async def embed_note_command(input_data: EmbedNoteInput) -> EmbedNoteOutput:
     """
     Generate and store embedding for a single note.
@@ -244,7 +257,7 @@ async def embed_note_command(input_data: EmbedNoteInput) -> EmbedNoteOutput:
             loader=Note.get,
         )
 
-    _, processing_time, error_message = await _embed_record(
+    _, processing_time = await _embed_record(
         input_data,
         kind="note",
         record_id=input_data.note_id,
@@ -252,14 +265,13 @@ async def embed_note_command(input_data: EmbedNoteInput) -> EmbedNoteOutput:
     )
 
     return EmbedNoteOutput(
-        success=error_message is None,
+        success=True,
         note_id=input_data.note_id,
         processing_time=processing_time,
-        error_message=error_message,
     )
 
 
-@command("embed_insight", app="open_notebook", retry=EMBED_RETRY_CONFIG)
+@async_task("embed_insight", **EMBED_RETRY_CONFIG)
 async def embed_insight_command(input_data: EmbedInsightInput) -> EmbedInsightOutput:
     """
     Generate and store embedding for a single source insight.
@@ -286,7 +298,7 @@ async def embed_insight_command(input_data: EmbedInsightInput) -> EmbedInsightOu
             loader=SourceInsight.get,
         )
 
-    _, processing_time, error_message = await _embed_record(
+    _, processing_time = await _embed_record(
         input_data,
         kind="insight",
         record_id=input_data.insight_id,
@@ -294,14 +306,13 @@ async def embed_insight_command(input_data: EmbedInsightInput) -> EmbedInsightOu
     )
 
     return EmbedInsightOutput(
-        success=error_message is None,
+        success=True,
         insight_id=input_data.insight_id,
         processing_time=processing_time,
-        error_message=error_message,
     )
 
 
-@command("embed_source", app="open_notebook", retry=EMBED_RETRY_CONFIG)
+@async_task("embed_source", **EMBED_RETRY_CONFIG)
 async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutput:
     """
     Generate and store embeddings for a source document.
@@ -388,7 +399,7 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
 
         return {"chunks_created": total_chunks}, f": {total_chunks} chunks"
 
-    extra_fields, processing_time, error_message = await _embed_record(
+    extra_fields, processing_time = await _embed_record(
         input_data,
         kind="source",
         record_id=input_data.source_id,
@@ -396,15 +407,14 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
     )
 
     return EmbedSourceOutput(
-        success=error_message is None,
+        success=True,
         source_id=input_data.source_id,
-        chunks_created=(extra_fields or {}).get("chunks_created", 0),
+        chunks_created=extra_fields.get("chunks_created", 0),
         processing_time=processing_time,
-        error_message=error_message,
     )
 
 
-@command("create_insight", app="open_notebook", retry=EMBED_RETRY_CONFIG)
+@async_task("create_insight", **EMBED_RETRY_CONFIG)
 async def create_insight_command(
     input_data: CreateInsightInput,
 ) -> CreateInsightOutput:
@@ -456,13 +466,9 @@ async def create_insight_command(
         if not insight_id:
             raise ValueError("Failed to create insight - no ID in result")
 
-        # 2. Submit embedding command (fire-and-forget)
-        submit_command(
-            "open_notebook",
-            "embed_insight",
-            {"insight_id": insight_id},
-        )
-        logger.debug(f"Submitted embed_insight command for {insight_id}")
+        # 2. Submit embedding job (fire-and-forget)
+        await submit_job("embed_insight", {"insight_id": insight_id})
+        logger.debug(f"Submitted embed_insight job for {insight_id}")
 
         processing_time = time.time() - start_time
         logger.info(
@@ -477,20 +483,16 @@ async def create_insight_command(
         )
 
     except ValueError as e:
-        # Permanent failure - don't retry
-        processing_time = time.time() - start_time
+        # Permanent failure. Re-raise so the job is recorded as `failed`
+        # (dont_autoretry_for already prevents a pointless retry).
         cmd_id = get_command_id(input_data)
         logger.error(
             f"Failed to create insight for source {input_data.source_id} "
             f"(command: {cmd_id}): {e}"
         )
-        return CreateInsightOutput(
-            success=False,
-            processing_time=processing_time,
-            error_message=str(e),
-        )
+        raise
     except Exception as e:
-        # Transient failure - will be retried (surreal-commands logs final failure)
+        # Transient failure - retried with exponential-jitter backoff
         cmd_id = get_command_id(input_data)
         logger.debug(
             f"Transient error creating insight for source {input_data.source_id} "
@@ -572,11 +574,23 @@ async def collect_items_for_rebuild(
     return items
 
 
-def _submit_embedding_jobs(
-    kind: str, command_name: str, id_field: str, item_ids: List[str]
+async def _submit_embedding_jobs(
+    kind: str,
+    command_name: str,
+    id_field: str,
+    item_ids: List[str],
+    *,
+    command_id: Optional[str] = None,
+    done_before: int = 0,
+    total_overall: int = 0,
 ) -> Tuple[int, int]:
     """
-    Submit one embedding command per item, logging progress every 50 items.
+    Submit one embedding job per item, logging progress every 50 items.
+
+    `done_before` / `total_overall` position this batch within the whole
+    rebuild so the reported progress is across all kinds, not just this one.
+    Progress is published on the same 50-item cadence as the logging - one DB
+    write per item would cost more than the work being tracked.
 
     Returns:
         (submitted_count, failed_count)
@@ -586,24 +600,27 @@ def _submit_embedding_jobs(
     failed = 0
     for idx, item_id in enumerate(item_ids, 1):
         try:
-            submit_command(
-                "open_notebook",
-                command_name,
-                {id_field: item_id},
-            )
+            await submit_job(command_name, {id_field: item_id})
             submitted += 1
-
-            if idx % 50 == 0 or idx == len(item_ids):
-                logger.info(f"  Progress: {idx}/{len(item_ids)} {kind} jobs submitted")
-
         except Exception as e:
             logger.error(f"Failed to submit {command_name} for {item_id}: {e}")
             failed += 1
 
+        if idx % 50 == 0 or idx == len(item_ids):
+            logger.info(f"  Progress: {idx}/{len(item_ids)} {kind} jobs submitted")
+            await report_progress(
+                command_id,
+                message="queueing_embeddings",
+                current=done_before + idx,
+                total=total_overall,
+            )
+
     return submitted, failed
 
 
-@command("rebuild_embeddings", app="open_notebook", retry=None)
+# Coordinator task: it only fans out embed_* jobs, each of which owns its own
+# retry policy. Retrying the coordinator would re-queue every item.
+@async_task("rebuild_embeddings", max_retries=0)
 async def rebuild_embeddings_command(
     input_data: RebuildEmbeddingsInput,
 ) -> RebuildEmbeddingsOutput:
@@ -620,8 +637,8 @@ async def rebuild_embeddings_command(
     their own retry strategies).
 
     Retry Strategy:
-    - Retries disabled (retry=None) for this coordinator command
-    - Individual embed_* commands handle their own retries
+    - Retries disabled for this coordinator task
+    - Individual embed_* tasks handle their own retries
     """
     start_time = time.time()
 
@@ -665,15 +682,23 @@ async def rebuild_embeddings_command(
                 processing_time=time.time() - start_time,
             )
 
-        # Submit one embedding command per item, per kind
-        sources_submitted, sources_failed = _submit_embedding_jobs(
-            "source", "embed_source", "source_id", items["sources"]
+        # Submit one embedding job per item, per kind
+        command_id = get_command_id(input_data)
+        sources_submitted, sources_failed = await _submit_embedding_jobs(
+            "source", "embed_source", "source_id", items["sources"],
+            command_id=command_id, done_before=0, total_overall=total_items,
         )
-        notes_submitted, notes_failed = _submit_embedding_jobs(
-            "note", "embed_note", "note_id", items["notes"]
+        notes_submitted, notes_failed = await _submit_embedding_jobs(
+            "note", "embed_note", "note_id", items["notes"],
+            command_id=command_id,
+            done_before=len(items["sources"]),
+            total_overall=total_items,
         )
-        insights_submitted, insights_failed = _submit_embedding_jobs(
-            "insight", "embed_insight", "insight_id", items["insights"]
+        insights_submitted, insights_failed = await _submit_embedding_jobs(
+            "insight", "embed_insight", "insight_id", items["insights"],
+            command_id=command_id,
+            done_before=len(items["sources"]) + len(items["notes"]),
+            total_overall=total_items,
         )
         failed_submissions = sources_failed + notes_failed + insights_failed
 
@@ -703,15 +728,9 @@ async def rebuild_embeddings_command(
         )
 
     except Exception as e:
-        processing_time = time.time() - start_time
+        # Re-raise so the job is recorded as `failed`. Returning success=False
+        # marks it `completed`, which showed the user a finished rebuild that
+        # had in fact done nothing.
         logger.error(f"Rebuild embeddings failed: {e}")
         logger.exception(e)
-
-        return RebuildEmbeddingsOutput(
-            success=False,
-            total_items=0,
-            jobs_submitted=0,
-            failed_submissions=0,
-            processing_time=processing_time,
-            error_message=str(e),
-        )
+        raise

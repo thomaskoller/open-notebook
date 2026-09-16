@@ -87,7 +87,7 @@ The [ai-prompter](https://github.com/lfnovo/ai-prompter) library (>= 0.4.0) uses
 
 ### Third-party libraries with the same shape
 
-The `podcast_creator` library's `configure("templates", {...})` compiles the given string directly as Jinja2 template source (`Prompter(template_text=...)` in its `config.py`) - the identical pattern to the vulnerability above. `commands/podcast_commands.py` never calls it (confirmed: podcast generation always uses the file-based `prompts/podcast/*.jinja` templates in this repo), so this is currently dormant, not exploitable. If a "custom podcast template" feature is ever added, route user/profile text through a fixed, developer-authored template with the text passed in as a plain variable - do not wire it into `configure("templates", ...)`.
+The `podcast_creator` library exposed `configure("templates", {...})`, which compiled the given string directly as Jinja2 template source - the identical pattern to the vulnerability above. It was dormant (never called here) and is now gone entirely: podcast generation runs in-repo through `open_notebook/podcasts/pipeline.py` and renders only the file-based `prompts/podcast/*.jinja` templates ([ADR-010](decisions/ADR-010-own-podcast-pipeline.md)). The rule still applies to any future "custom podcast template" feature: route user/profile text through a fixed, developer-authored template with the text passed in as a plain variable - never compile it as template source.
 
 ---
 

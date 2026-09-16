@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 INTERNAL_NO_PROXY_HOSTS = (
     "host.docker.internal",
     "surrealdb",
+    "redis",
     "localhost",
     "127.0.0.1",
 )
@@ -70,12 +71,31 @@ def _configured_db_host() -> str | None:
     return host or None
 
 
+def _configured_broker_host() -> str | None:
+    """Best-effort extraction of the Redis host from ``REDIS_URL``.
+
+    The Celery broker connection is internal for the same reason the DB one is
+    (compose service name / localhost), so it must bypass any configured proxy
+    too. Parsed from the env directly to keep this module import-free.
+    """
+    candidate = os.environ.get("REDIS_URL", "").strip()
+    if not candidate:
+        return None
+    if "://" not in candidate:
+        candidate = "redis://" + candidate
+    try:
+        host = urlsplit(candidate).hostname
+    except ValueError:
+        return None
+    return host or None
+
+
 def _internal_hosts() -> list[str]:
-    """The default internal hosts plus the configured SurrealDB host, if any."""
+    """Default internal hosts plus the configured SurrealDB / Redis hosts."""
     hosts = list(INTERNAL_NO_PROXY_HOSTS)
-    db_host = _configured_db_host()
-    if db_host and db_host.lower() not in {h.lower() for h in hosts}:
-        hosts.append(db_host)
+    for extra in (_configured_db_host(), _configured_broker_host()):
+        if extra and extra.lower() not in {h.lower() for h in hosts}:
+            hosts.append(extra)
     return hosts
 
 

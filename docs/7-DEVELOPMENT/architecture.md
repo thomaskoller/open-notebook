@@ -598,19 +598,22 @@ async def ask(request: AskRequest):
 
 ### 5. **Job Queue Pattern**
 
-For async background tasks (source processing), use Surreal-Commands job queue:
+Async background work runs on Celery (broker: Redis), while the SurrealDB
+`command` table stays the product-facing record of each job — see
+[ADR-009](decisions/ADR-009-celery-queue.md).
 
 ```python
-# Submit job
+# Submit (creates the command row, then publishes the task by name)
 command_id = await CommandService.submit_command_job(
-    app="open_notebook",
-    command="process_source",
-    input={...}
+    "open_notebook", "process_source", {...}
 )
 
 # Poll status
 status = await source.get_status()
 ```
+
+Operators watch the queue itself in Flower (`make flower`,
+http://127.0.0.1:5555): queue depth, in-flight tasks, retries, worker health.
 
 ---
 
@@ -663,12 +666,15 @@ model = await provision_langchain_model(task="chat")
 response = await model.ainvoke({"input": prompt})
 ```
 
-### API → Job Queue (Surreal-Commands)
+### API → Job Queue (Celery + Redis)
 
-1. **Async job submission**
-2. **Fire-and-forget pattern**
-3. **Status polling via `/commands/{id}` endpoint**
-4. **Job completion callbacks (optional)**
+1. **Async job submission** — the `command` row is created *before* the task is
+   published, so the caller can link it and the UI can poll it immediately
+2. **Fire-and-forget pattern** — dispatch is by task name, so the API process
+   does not need the task modules imported
+3. **Status polling via `/api/commands/jobs/{id}`**, or the whole in-flight
+   picture in one request via `/api/commands/jobs?active=true`
+4. **Celery signals** mirror every state transition onto the `command` row
 
 **Example**:
 ```python
@@ -676,8 +682,9 @@ response = await model.ainvoke({"input": prompt})
 command_id = await CommandService.submit_command_job(...)
 
 # Client polls status
-response = await fetch(f"http://localhost:5055/commands/{command_id}")
-status = await response.json()  # returns { status: "running|queued|completed|failed" }
+response = await fetch(f"http://localhost:5055/api/commands/jobs/{command_id}")
+status = await response.json()
+# { status: "queued|running|retrying|completed|failed|cancelled", progress: {...} }
 ```
 
 ---

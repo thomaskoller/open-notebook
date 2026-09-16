@@ -147,21 +147,24 @@ Step-by-step guides for common types of changes in the Open Notebook codebase. E
 
 ---
 
-## Playbook: New Background Command
+## Playbook: New Background Task
 
-**Example:** "Add command to rebuild all embeddings for a notebook"
+**Example:** "Add a task to rebuild all embeddings for a notebook"
 
 | Step | File(s) | What to Do |
 |------|---------|------------|
-| 1 | `commands/<name>_commands.py` | Define `CommandInput` and `CommandOutput` Pydantic classes. Write the command function. |
-| 2 | Register command | Add to the command service so it can be submitted via `CommandService.submit_command_job()`. |
-| 3 | API endpoint | Add endpoint that submits the command and returns the command ID. |
-| 4 | Frontend (polling) | Use `/commands/{command_id}` endpoint to poll for status. Show progress to user. |
+| 1 | `commands/<name>_commands.py` | Define `TaskInput` / `TaskOutput` Pydantic subclasses, then write an `async def` body decorated with `@async_task("name", ...)` from `open_notebook/celery_app.py`. |
+| 2 | `commands/__init__.py` | Export the task — importing this package is what registers it with the worker. |
+| 3 | API endpoint | Submit with `await CommandService.submit_command_job("open_notebook", "name", args)` and return the command id. |
+| 4 | `tests/test_celery_task_registry.py` | Add the task and its retry budget to `EXPECTED` (the test asserts the exact task set). |
+| 5 | Frontend | Nothing required — the jobs drawer picks it up automatically. Add a `jobs.commands.<name>` label to all 14 locales plus `COMMAND_LABEL_KEY` in `JobsDrawer.tsx` so it shows a real name instead of the raw task name. |
 
 **Pattern:**
-- Commands are fire-and-forget: submit returns immediately with a command ID
-- Retry config: `max_attempts`, `stop_on` exceptions (ValueError = no retry)
-- Exponential backoff with jitter for transient failures
+- Fire-and-forget: submit creates the `command` row, then returns its id immediately
+- Retry config is per task: `max_retries`, `retry_backoff`/`retry_backoff_max`, and `dont_autoretry_for` for permanent failures
+- **Raise on failure, never return `success=False`** — job status, not the payload, is what the UI reads
+- Report progress with `await report_progress(command_id, message="<i18n key>", current=..., total=...)`
+- Verify with `make flower` (http://127.0.0.1:5555): the task must appear in the worker's registered list
 
 ---
 
@@ -198,7 +201,8 @@ Step-by-step guides for common types of changes in the Open Notebook codebase. E
 | AI/LLM | `open_notebook/ai/` | Esperanto types | `tests/` |
 | Graphs | `open_notebook/graphs/` | TypedDict state | `tests/` |
 | Prompts | `prompts/**/*.jinja` | Jinja2 context | — |
-| Commands | `commands/` | CommandInput/Output | `tests/` |
+| Background tasks | `commands/` | TaskInput/TaskOutput | `tests/` |
+| Celery app / job state | `open_notebook/celery_app.py` | `command` table | `tests/test_job_lifecycle.py` |
 | API routers | `api/routers/` | `api/models.py` | `tests/` |
 | API services | `api/*_service.py` | — | `tests/` |
 | Frontend types | `frontend/src/lib/types/` | TypeScript interfaces | — |

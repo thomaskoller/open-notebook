@@ -30,7 +30,7 @@ async def test_text_insights_keep_their_id_and_resolve_the_parent_source(
     async with AsyncSurreal("mem://") as db:
         await db.use("search_regression", "insight_parent")
         # Only the search schema/functions are needed. Unrelated podcast
-        # migrations depend on tables owned by podcast-creator.
+        # migrations depend on tables the skipped migrations create.
         await db.query((MIGRATIONS / "1.surrealql").read_text())
         for migration in AsyncMigrationManager().up_migrations[23:]:
             await db.query(migration.sql)

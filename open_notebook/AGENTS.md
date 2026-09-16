@@ -5,7 +5,7 @@ Normative rules for working on the Python backend. Architecture and design ratio
 ## Commands
 
 - Run API: `uv run uvicorn api.main:app --port 5055` (Swagger at http://localhost:5055/docs)
-- Background jobs need the worker: `make worker-start` (`surreal-commands-worker --import-modules commands`)
+- Background jobs need the worker: `make worker-start` (`celery -A open_notebook.celery_app:celery worker`) and Redis (`make redis`); `make flower` to watch them
 - Tests: `uv run pytest tests/`
 - Lint/typecheck: `ruff check . --fix` and `uv run python -m mypy .`
 
@@ -52,11 +52,17 @@ Normative rules for working on the Python backend. Architecture and design ratio
 - Transaction-conflict `RuntimeError`s are retriable and logged at DEBUG (don't "fix" the missing stack trace).
 - Read the `snl-development:surrealdb-queries` skill notes / SurrealDB docs before writing SurrealQL.
 
-## Background commands (`commands/`)
+## Background tasks (`commands/`)
 
-- Retry config uses a blocklist: `stop_on: [ValueError]` — raise `ValueError` for permanent failures (no retry, job marked `failed`); any other exception auto-retries.
-- Submission is fire-and-forget via `submit_command()`; commands must be idempotent-ish under retry.
-- Podcast generation uses `max_attempts: 1` on purpose (prevents duplicate episodes); retry is the explicit `POST /podcasts/episodes/{id}/retry` endpoint.
+Celery executes, SurrealDB records — see [ADR-009](../docs/7-DEVELOPMENT/decisions/ADR-009-celery-queue.md).
+
+- Define a task with `@async_task("name", ...)` from `open_notebook/celery_app.py`. The body stays `async def` and takes a `TaskInput` subclass; the decorator bridges it to Celery with `asyncio.run`.
+- Retry config uses a blocklist: `dont_autoretry_for=(ValueError, ConfigurationError, ContextLengthExceededError)` — raise one of those for permanent failures (no retry, job marked `failed`); any other exception auto-retries with exponential-jitter backoff.
+- **Never return `success=False` for a failure — raise.** Job *status*, not the payload, is what the API and UI read; returning marks the job `completed` and hides the failure.
+- Submit with `await submit_job("name", args)`; it creates the `command` row before publishing and returns its id. Tasks must be idempotent-ish: `task_acks_late` means a killed worker redelivers.
+- Publish progress with `await report_progress(command_id, message=..., current=..., total=...)`. `message` is an i18n key — add it under `jobs.progress.*` in all 14 locales and to `PROGRESS_LABEL_KEY` in `JobsDrawer.tsx`.
+- Podcast generation uses `max_retries=0` on purpose (prevents duplicate episodes); retry is the explicit `POST /podcasts/episodes/{id}/retry` endpoint.
+- Cancellation only removes *queued* jobs: the worker runs a threads pool, so a started task always runs to completion.
 
 ## Prompts (`prompts/`)
 

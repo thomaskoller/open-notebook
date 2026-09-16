@@ -31,7 +31,7 @@ export OPEN_NOTEBOOK_CHUNK_OVERLAP=150
 | Source | explicit `source.vectorize()` → `embed_source` (NOT automatic on save) |
 | Everything | `rebuild_embeddings_command` fans out individual jobs |
 
-All embedding is fire-and-forget through the surreal-commands worker — nothing embeds if the worker isn't running.
+All embedding is fire-and-forget through the Celery worker — nothing embeds if the worker (or Redis) isn't running. `make flower` shows whether the jobs are queued, running or failing.
 
 ## Context building (`utils/context_builder.py`)
 

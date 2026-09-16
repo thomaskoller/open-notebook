@@ -665,7 +665,7 @@ class TestTransformationModelIdForwarding:
             source_id="source:123", transformation_id="transformation:456"
         )
 
-        await run_transformation_command(input_data)
+        await run_transformation_command.impl(input_data)
 
         mock_ainvoke.assert_awaited_once()
         config = mock_ainvoke.await_args.kwargs["config"]

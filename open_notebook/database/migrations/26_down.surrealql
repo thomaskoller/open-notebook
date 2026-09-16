@@ -1,0 +1,15 @@
+-- Revert migration 26.
+--
+-- Only the definitions this migration added are removed; the table itself and
+-- its rows are left alone. Dropping `command` would orphan every
+-- `source.command` / `episode.command` reference.
+REMOVE INDEX IF EXISTS idx_command_status ON TABLE command;
+REMOVE INDEX IF EXISTS idx_command_task_id ON TABLE command;
+
+REMOVE FIELD IF EXISTS app ON TABLE command;
+REMOVE FIELD IF EXISTS command ON TABLE command;
+REMOVE FIELD IF EXISTS task_id ON TABLE command;
+REMOVE FIELD IF EXISTS progress ON TABLE command;
+REMOVE FIELD IF EXISTS attempt ON TABLE command;
+REMOVE FIELD IF EXISTS started_at ON TABLE command;
+REMOVE FIELD IF EXISTS completed_at ON TABLE command;

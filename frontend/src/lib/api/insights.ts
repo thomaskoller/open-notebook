@@ -22,12 +22,18 @@ export interface InsightCreationResponse {
   command_id?: string
 }
 
+/** @deprecated use Job from '@/lib/types/jobs' - kept for this module's callers */
 export interface CommandJobStatusResponse {
   job_id: string
   status: string
   result?: Record<string, unknown>
   error_message?: string
 }
+
+export type CommandOutcome =
+  | { outcome: 'completed' }
+  | { outcome: 'failed'; errorMessage?: string }
+  | { outcome: 'timeout' }
 
 export const insightsApi = {
   listForSource: async (sourceId: string) => {
@@ -60,13 +66,16 @@ export const insightsApi = {
   },
 
   /**
-   * Poll command status until completed or failed.
-   * Returns true if completed successfully, false if failed.
+   * Poll command status until it reaches a terminal state.
+   *
+   * Returns *why* it ended, not just a boolean: a failed job's message is the
+   * only thing that tells the user what went wrong, and callers used to
+   * discard it (failures reached console.error and nothing else).
    */
   waitForCommand: async (
     commandId: string,
     options?: { maxAttempts?: number; intervalMs?: number }
-  ): Promise<boolean> => {
+  ): Promise<CommandOutcome> => {
     const maxAttempts = options?.maxAttempts ?? 60 // Default 60 attempts
     const intervalMs = options?.intervalMs ?? 2000 // Default 2 seconds
 
@@ -74,13 +83,12 @@ export const insightsApi = {
       try {
         const status = await insightsApi.getCommandStatus(commandId)
         if (status.status === 'completed') {
-          return true
+          return { outcome: 'completed' }
         }
-        if (status.status === 'failed' || status.status === 'canceled') {
-          console.error('Command failed:', status.error_message)
-          return false
+        if (status.status === 'failed' || status.status === 'cancelled') {
+          return { outcome: 'failed', errorMessage: status.error_message }
         }
-        // Still running, wait and retry
+        // Still queued/running/retrying - wait and poll again
         await new Promise(resolve => setTimeout(resolve, intervalMs))
       } catch (error) {
         console.error('Error checking command status:', error)
@@ -88,8 +96,6 @@ export const insightsApi = {
         await new Promise(resolve => setTimeout(resolve, intervalMs))
       }
     }
-    // Timeout
-    console.warn('Command polling timed out')
-    return false
+    return { outcome: 'timeout' }
   }
 }

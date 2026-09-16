@@ -117,7 +117,9 @@ export function InlineEdit({
         }}
         className={cn(
           "px-2 py-1 bg-background border rounded focus:outline-none focus:ring-2 focus:ring-primary w-full",
-          "min-h-[60px] resize-none",
+          // Grow with the content (up to a cap, then scroll) instead of
+          // staying 60px tall while the text disappears below the fold.
+          "field-sizing-content min-h-[60px] max-h-[50vh] resize-none",
           inputClassName
         )}
         placeholder={placeholder}

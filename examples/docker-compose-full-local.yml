@@ -41,6 +41,17 @@ services:
     restart: always
     pull_policy: always
 
+  redis:
+    image: redis:8-alpine
+    # Celery broker + result backend. Persistence off on purpose: job state of
+    # record lives in SurrealDB, so a Redis restart loses at most the in-flight
+    # queue, never user data.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: always
+    pull_policy: always
+
   ollama:
     image: ollama/ollama:latest
     ports:
@@ -85,12 +96,16 @@ services:
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
 
+      # Celery broker + result backend (required for background jobs)
+      - REDIS_URL=redis://redis:6379/0
+
       # Ollama connection (optional, can also configure via UI)
       - OLLAMA_API_BASE=http://ollama:11434
     volumes:
       - ./notebook_data:/app/data
     depends_on:
       - surrealdb
+      - redis
       - ollama
       - speaches
     restart: always
