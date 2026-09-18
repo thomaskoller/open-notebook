@@ -158,7 +158,7 @@ export default function NotebookPage() {
           <NotebookHeader notebook={notebook} />
         </div>
 
-        <div className="flex-1 p-6 pt-6 overflow-x-auto flex flex-col">
+        <div className="flex-1 min-h-0 p-6 pt-6 flex flex-col">
           {/* Mobile: Tabbed interface - only render on mobile to avoid double-mounting */}
           {!isDesktop && (
             <>

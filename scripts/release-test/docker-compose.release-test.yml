@@ -6,6 +6,10 @@ services:
     volumes:
       - ${DATA_DIR:?set DATA_DIR}/surreal:/mydata
 
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
   app:
     image: ${APP_IMAGE:?set APP_IMAGE}
     ports:
@@ -22,6 +26,9 @@ services:
       - SURREAL_PASSWORD=root
       - SURREAL_NAMESPACE=${RC_SURREAL_NS:-open_notebook}
       - SURREAL_DATABASE=${RC_SURREAL_DB:-open_notebook}
+      # Celery broker: the in-image worker consumes nothing without it, so the
+      # "worker processed source" assertion below is also a Redis wiring check.
+      - REDIS_URL=redis://redis:6379/0
       # Opt-in heavy runtimes: empty by default (fresh/upgrade tests stay fast);
       # rc-stack.sh --with-runtimes sets these to install Docling/Crawl4AI so the
       # published image's opt-in path can be exercised with real data.
@@ -37,6 +44,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - surrealdb
+      - redis
 
   proxy:
     image: nginx:alpine

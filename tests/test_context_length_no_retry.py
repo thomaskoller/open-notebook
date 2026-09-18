@@ -10,16 +10,19 @@ Two properties are pinned here:
 
 1. `classify_error()` maps a context-length message to `ContextLengthExceededError`
    (guards the rule and its ordering in `_CLASSIFICATION_RULES`).
-2. The registered commands' retry configs stop on it after a single attempt,
-   while a transient error still consumes the full retry budget (guards
-   `stop_on`, and guards against over-correcting into "never retry anything").
+2. The registered tasks treat it as permanent, while a transient error still
+   gets retried with backoff (guards `dont_autoretry_for`, and guards against
+   over-correcting into "never retry anything").
+
+The retry assertions drive Celery's real autoretry wrapper, so they break if the
+task options stop meaning what we think they mean.
 """
 
 import pytest
-from surreal_commands.core.registry import registry
-from surreal_commands.core.retry import build_async_retry_instance
+from conftest import RetryCalled, capture_retries, run_task_expecting
 
-import commands  # noqa: F401  -- import registers the @command decorators
+import commands  # noqa: F401  -- import registers the tasks
+from open_notebook.celery_app import celery
 from open_notebook.exceptions import (
     ContextLengthExceededError,
     ExternalServiceError,
@@ -33,38 +36,17 @@ OPENROUTER_CONTEXT_LENGTH_400 = (
     "(395117 of text input, 8192 in the output).\", 'code': 400}}"
 )
 
-# Commands whose retry config must treat context-length errors as permanent.
-RETRY_COMMANDS = [
+# Tasks whose retry config must treat context-length errors as permanent.
+RETRY_TASKS = [
     "open_notebook.process_source",
     "open_notebook.run_transformation",
 ]
 
 
-def _retry_config(command_id: str):
-    """The live retry config the worker would actually use for this command."""
-    item = registry.get_command_by_id(command_id)
-    assert item is not None, f"{command_id} is not registered"
-    assert item.retry_config is not None, f"{command_id} has no retry config"
-    return item.retry_config
-
-
-def _instant(config):
-    """Same config, but without the real backoff, so tests don't sleep."""
-    return config.model_copy(
-        update={"wait_strategy": "fixed", "wait_time": 0, "wait_min": 0, "wait_max": 0}
-    )
-
-
-async def _count_attempts(config, exc: Exception) -> int:
-    """Drive the real tenacity instance and report how many attempts it made."""
-    attempts = 0
-    retrying = build_async_retry_instance(_instant(config))
-    with pytest.raises(type(exc)):
-        async for attempt in retrying:
-            with attempt:
-                attempts += 1
-                raise exc
-    return attempts
+def _task(task_name: str):
+    task = celery.tasks.get(task_name)
+    assert task is not None, f"{task_name} is not registered"
+    return task
 
 
 class TestClassification:
@@ -88,31 +70,56 @@ class TestClassification:
         assert not issubclass(exc_class, ContextLengthExceededError)
 
 
-@pytest.mark.parametrize("command_id", RETRY_COMMANDS)
+@pytest.mark.parametrize("task_name", RETRY_TASKS)
 class TestRetryBehaviour:
-    def test_stop_on_lists_context_length(self, command_id):
-        assert ContextLengthExceededError in _retry_config(command_id).stop_on
+    def test_dont_autoretry_for_lists_context_length(self, task_name):
+        assert ContextLengthExceededError in _task(task_name).dont_autoretry_for
 
-    @pytest.mark.asyncio
-    async def test_context_length_is_attempted_once(self, command_id):
-        config = _retry_config(command_id)
-
-        attempts = await _count_attempts(
-            config, ContextLengthExceededError("Content too large")
+    def test_context_length_is_never_retried(self, task_name, monkeypatch):
+        task = _task(task_name)
+        monkeypatch.setattr(
+            task,
+            "_orig_run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                ContextLengthExceededError("Content too large")
+            ),
         )
 
-        assert attempts == 1, (
-            f"{command_id} retried a deterministic context-length failure "
-            f"{attempts} times; it must fail after the first attempt (#1231)"
+        with capture_retries(task) as countdowns:
+            raised = run_task_expecting(task, {}, countdowns)
+
+        assert isinstance(raised, ContextLengthExceededError), (
+            f"{task_name} did not let a deterministic context-length failure "
+            f"through; it must fail on the first attempt (#1231)"
+        )
+        assert countdowns == [], (
+            f"{task_name} scheduled {len(countdowns)} retry(s) for a "
+            f"context-length failure"
         )
 
-    @pytest.mark.asyncio
-    async def test_transient_error_still_uses_full_budget(self, command_id):
+    def test_transient_error_still_retries(self, task_name, monkeypatch):
         """Proves the fix narrows retries rather than disabling them."""
-        config = _retry_config(command_id)
-
-        attempts = await _count_attempts(
-            config, RuntimeError("Failed to commit transaction due to a conflict")
+        task = _task(task_name)
+        monkeypatch.setattr(
+            task,
+            "_orig_run",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                RuntimeError("Failed to commit transaction due to a conflict")
+            ),
         )
 
-        assert attempts == config.max_attempts
+        with capture_retries(task) as countdowns:
+            raised = run_task_expecting(task, {}, countdowns)
+
+        assert isinstance(raised, RetryCalled)
+        assert len(countdowns) == 1
+        # Backoff is bounded by the task's own ceiling.
+        assert 0 <= countdowns[0] <= task.retry_backoff_max
+
+    def test_retry_budget_preserved(self, task_name):
+        """Total attempts must match what surreal-commands used to allow."""
+        expected = {
+            "open_notebook.process_source": 14,  # was max_attempts: 15
+            "open_notebook.run_transformation": 4,  # was max_attempts: 5
+        }
+        assert _task(task_name).max_retries == expected[task_name]

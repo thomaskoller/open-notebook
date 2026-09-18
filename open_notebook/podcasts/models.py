@@ -78,7 +78,7 @@ class EpisodeProfile(ObjectModel):
     num_segments: int = Field(default=5, description="Number of podcast segments")
     max_tokens: Optional[int] = Field(
         None,
-        description="Max output tokens for outline/transcript generation (passed through to podcast_creator)",
+        description="Max output tokens for outline/transcript generation",
     )
 
     @field_validator("num_segments")
@@ -248,7 +248,7 @@ class PodcastEpisode(ObjectModel):
         default_factory=dict, description="Generated outline"
     )
     command: Optional[Union[str, RecordID]] = Field(
-        default=None, description="Link to surreal-commands job"
+        default=None, description="Link to the background job"
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -259,10 +259,10 @@ class PodcastEpisode(ObjectModel):
             return None
 
         try:
-            from surreal_commands import get_command_status
+            from open_notebook.celery_app import effective_status, get_job
 
-            status = await get_command_status(str(self.command))
-            return status.status if status else "unknown"
+            job = await get_job(str(self.command))
+            return effective_status(job) if job else "unknown"
         except Exception:
             return "unknown"
 
@@ -272,14 +272,14 @@ class PodcastEpisode(ObjectModel):
             return {"status": None, "error_message": None}
 
         try:
-            from surreal_commands import get_command_status
+            from open_notebook.celery_app import effective_status, get_job
 
-            status = await get_command_status(str(self.command))
-            if not status:
+            job = await get_job(str(self.command))
+            if not job:
                 return {"status": "unknown", "error_message": None}
             return {
-                "status": status.status,
-                "error_message": getattr(status, "error_message", None),
+                "status": effective_status(job),
+                "error_message": job.get("error_message"),
             }
         except Exception:
             return {"status": "unknown", "error_message": None}
@@ -291,19 +291,11 @@ class PodcastEpisode(ObjectModel):
         """
         Batch-fetch {status, error_message} for many commands in one query.
 
-        Listing episodes otherwise calls get_job_detail() -> surreal_commands
-        .get_command_status() once per episode, each its own round trip
-        against the `command` table (no connection pooling in the repository
-        layer, see docs/7-DEVELOPMENT/architecture.md) - O(n) queries for n
-        episodes. surreal_commands has no batch lookup, but its command table
-        lives in the same database (same SURREAL_* env vars), so this queries
-        it directly in one shot instead of looping through the library's
-        per-command helper.
-
-        CommandStatus is a `str` subclass (`class CommandStatus(str, Enum)`),
-        so returning the raw DB string here is interchangeable with the
-        enum-wrapped value get_job_detail() returns for every comparison
-        this codebase does against it.
+        Listing episodes otherwise calls get_job_detail() once per episode,
+        each its own round trip against the `command` table (no connection
+        pooling in the repository layer, see
+        docs/7-DEVELOPMENT/architecture.md) - O(n) queries for n episodes.
+        This fetches them all in one query instead.
         """
         ids = [cid for cid in command_ids if cid]
         grouped: Dict[str, dict] = {}
@@ -317,9 +309,11 @@ class PodcastEpisode(ObjectModel):
         except Exception as e:
             logger.error(f"Error batch-fetching command status: {e}")
             return grouped
+        from open_notebook.celery_app import effective_status
+
         for row in result:
             grouped[str(row.get("id"))] = {
-                "status": row.get("status", "unknown"),
+                "status": effective_status(row),
                 "error_message": row.get("error_message"),
             }
         return grouped

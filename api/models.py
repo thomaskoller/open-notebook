@@ -259,6 +259,30 @@ class EmbedResponse(BaseModel):
     )
 
 
+# Background job models (see open_notebook/celery_app.py)
+class CommandJobResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+
+
+class CommandJobStatusResponse(BaseModel):
+    job_id: str
+    status: str = Field(
+        ..., description="queued, running, retrying, completed, failed or cancelled"
+    )
+    command: Optional[str] = Field(None, description="Task name, e.g. 'embed_source'")
+    task_id: Optional[str] = Field(None, description="Celery task id (Flower lookup)")
+    result: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    progress: Optional[Dict[str, Any]] = Field(
+        None, description="{message, current, total, percent} while running"
+    )
+    attempt: int = 0
+    created: Optional[str] = None
+    updated: Optional[str] = None
+
+
 # Rebuild request/response models
 class RebuildRequest(BaseModel):
     mode: Literal["existing", "all"] = Field(

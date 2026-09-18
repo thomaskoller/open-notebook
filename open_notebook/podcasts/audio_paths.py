@@ -39,7 +39,7 @@ def podcasts_root() -> Path:
 def to_relative_audio_path(audio_path: Union[str, Path]) -> str:
     """Convert a generated audio file path to the DB storage form.
 
-    Accepts the absolute (or CWD-relative) path produced by podcast-creator,
+    Accepts the absolute (or CWD-relative) path produced by the pipeline,
     including the legacy ``file://`` URI form, and returns it relative to
     ``PODCASTS_FOLDER`` as a POSIX-style string.
 

@@ -3,8 +3,13 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.runnables import RunnableConfig
 from loguru import logger
-from surreal_commands import CommandInput, CommandOutput, command
 
+from open_notebook.celery_app import (
+    TaskInput,
+    TaskOutput,
+    async_task,
+    report_progress,
+)
 from open_notebook.database.repository import ensure_record_id
 from open_notebook.domain.notebook import Source
 from open_notebook.domain.transformation import Transformation
@@ -18,7 +23,7 @@ except ImportError as e:
     raise ValueError("graphs not available")
 
 
-class SourceProcessingInput(CommandInput):
+class SourceProcessingInput(TaskInput):
     source_id: str
     content_state: Dict[str, Any]
     notebook_ids: List[str]
@@ -26,7 +31,7 @@ class SourceProcessingInput(CommandInput):
     embed: bool
 
 
-class SourceProcessingOutput(CommandOutput):
+class SourceProcessingOutput(TaskOutput):
     success: bool
     source_id: str
     embedded_chunks: int = 0
@@ -35,17 +40,16 @@ class SourceProcessingOutput(CommandOutput):
     error_message: Optional[str] = None
 
 
-@command(
+@async_task(
     "process_source",
-    app="open_notebook",
-    retry={
-        "max_attempts": 15,  # Handle deep queues (workaround for SurrealDB v2 transaction conflicts)
-        "wait_strategy": "exponential_jitter",
-        "wait_min": 1,
-        "wait_max": 120,  # Allow queue to drain
-        "stop_on": [ValueError, ConfigurationError, ContextLengthExceededError],  # Don't retry validation/config errors
-        "retry_log_level": "debug",  # Avoid log noise during transaction conflicts
-    },
+    autoretry_for=(Exception,),
+    # Don't retry validation/config errors - they will never succeed
+    dont_autoretry_for=(ValueError, ConfigurationError, ContextLengthExceededError),
+    max_retries=14,  # Handle deep queues (workaround for SurrealDB v2 transaction conflicts)
+    retry_backoff=1,
+    retry_backoff_max=120,  # Allow queue to drain
+    retry_jitter=True,
+    retry_log_level="debug",  # Avoid log noise during transaction conflicts
 )
 async def process_source_command(
     input_data: SourceProcessingInput,
@@ -54,12 +58,19 @@ async def process_source_command(
     Process source content using the source_graph workflow
     """
     start_time = time.time()
+    command_id = (
+        input_data.execution_context.command_id
+        if input_data.execution_context
+        else None
+    )
 
     try:
         logger.info(f"Starting source processing for source: {input_data.source_id}")
         logger.info(f"Notebook IDs: {input_data.notebook_ids}")
         logger.info(f"Transformations: {input_data.transformations}")
         logger.info(f"Embed: {input_data.embed}")
+
+        await report_progress(command_id, message="extracting")
 
         # 1. Load transformation objects from IDs
         transformations = []
@@ -78,17 +89,19 @@ async def process_source_command(
             raise ValueError(f"Source '{input_data.source_id}' not found")
 
         # Update source with command reference
-        source.command = (
-            ensure_record_id(input_data.execution_context.command_id)
-            if input_data.execution_context
-            else None
-        )
+        source.command = ensure_record_id(command_id) if command_id else None
         await source.save()
 
         logger.info(f"Updated source {source.id} with command reference")
 
         # 3. Process source with all notebooks
         logger.info(f"Processing source with {len(input_data.notebook_ids)} notebooks")
+
+        await report_progress(
+            command_id,
+            message="transforming" if transformations else "saving",
+            total=len(transformations) or None,
+        )
 
         # Execute source_graph with all notebooks.
         # LangGraph accepts a partial state dict at runtime, but its typed
@@ -130,16 +143,16 @@ async def process_source_command(
         )
 
     except ValueError as e:
-        # Validation errors are permanent failures. Re-raise so surreal-commands
-        # marks the job as `failed` (stop_on=[ValueError] already prevents
-        # pointless retries). Returning a success=False result instead marks the
-        # job `completed` (is_success() checks job status, not the payload),
-        # which hid extraction failures and left the source without a retryable
-        # `failed` status in the UI.
+        # Validation errors are permanent failures. Re-raise so the job is
+        # marked `failed` (dont_autoretry_for already prevents pointless
+        # retries). Returning a success=False result instead marks the job
+        # `completed` - job status, not the payload, is what the UI reads -
+        # which hid extraction failures and left the source without a
+        # retryable `failed` status in the UI.
         logger.error(f"Source processing failed (permanent): {e}")
         raise
     except Exception as e:
-        # Transient failure - will be retried (surreal-commands logs final failure)
+        # Transient failure - retried with exponential-jitter backoff
         logger.debug(
             f"Transient error processing source {input_data.source_id}: {e}"
         )
@@ -151,14 +164,14 @@ async def process_source_command(
 # =============================================================================
 
 
-class RunTransformationInput(CommandInput):
+class RunTransformationInput(TaskInput):
     """Input for running a transformation on an existing source."""
 
     source_id: str
     transformation_id: str
 
 
-class RunTransformationOutput(CommandOutput):
+class RunTransformationOutput(TaskOutput):
     """Output from transformation command."""
 
     success: bool
@@ -168,17 +181,16 @@ class RunTransformationOutput(CommandOutput):
     error_message: Optional[str] = None
 
 
-@command(
+@async_task(
     "run_transformation",
-    app="open_notebook",
-    retry={
-        "max_attempts": 5,
-        "wait_strategy": "exponential_jitter",
-        "wait_min": 1,
-        "wait_max": 60,
-        "stop_on": [ValueError, ConfigurationError, ContextLengthExceededError],  # Don't retry validation/config errors
-        "retry_log_level": "warning",
-    },
+    autoretry_for=(Exception,),
+    # Don't retry validation/config errors - they will never succeed
+    dont_autoretry_for=(ValueError, ConfigurationError, ContextLengthExceededError),
+    max_retries=4,
+    retry_backoff=1,
+    retry_backoff_max=60,
+    retry_jitter=True,
+    retry_log_level="warning",
 )
 async def run_transformation_command(
     input_data: RunTransformationInput,
@@ -241,21 +253,17 @@ async def run_transformation_command(
         )
 
     except ValueError as e:
-        # Validation errors are permanent failures - don't retry
-        processing_time = time.time() - start_time
+        # Permanent failure. Re-raise rather than returning success=False:
+        # the job's status is what the UI reads, and a returned payload still
+        # marks the job `completed`, hiding the failure (same reasoning as
+        # process_source above). dont_autoretry_for already prevents retries.
         logger.error(
             f"Failed to run transformation {input_data.transformation_id} "
             f"on source {input_data.source_id}: {e}"
         )
-        return RunTransformationOutput(
-            success=False,
-            source_id=input_data.source_id,
-            transformation_id=input_data.transformation_id,
-            processing_time=processing_time,
-            error_message=str(e),
-        )
+        raise
     except Exception as e:
-        # Transient failure - will be retried (surreal-commands logs final failure)
+        # Transient failure - retried with exponential-jitter backoff
         logger.debug(
             f"Transient error running transformation {input_data.transformation_id} "
             f"on source {input_data.source_id}: {e}"

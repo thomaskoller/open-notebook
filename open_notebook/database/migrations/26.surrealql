@@ -1,0 +1,30 @@
+-- Migration 26: take ownership of the `command` table (ADR-009).
+--
+-- surreal-commands used to create this table implicitly. Celery replaced it as
+-- the executor, but the table stays as the product-facing job record: it is
+-- what `source.command` and `episode.command` point at
+-- (`option<record<command>>`, migrations 8 and 7), what `GET /api/sources`
+-- resolves inline via FETCH, and what the UI polls.
+--
+-- SCHEMALESS on purpose: `input` and `result` hold arbitrary per-task payloads,
+-- and existing rows written by surreal-commands must keep loading unchanged.
+-- The fields below are the contract the API and frontend rely on.
+DEFINE TABLE IF NOT EXISTS command SCHEMALESS;
+
+DEFINE FIELD IF NOT EXISTS app ON TABLE command TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS command ON TABLE command TYPE option<string>;
+-- Celery task id. The bridge between this row and Flower.
+DEFINE FIELD IF NOT EXISTS task_id ON TABLE command TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE command TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS error_message ON TABLE command TYPE option<string>;
+-- {message, current, total, percent}, published by celery_app.report_progress
+DEFINE FIELD IF NOT EXISTS progress ON TABLE command FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS attempt ON TABLE command TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS started_at ON TABLE command TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS completed_at ON TABLE command TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE command TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE command TYPE option<datetime>;
+
+-- The jobs drawer polls "everything queued/running/retrying, newest first".
+DEFINE INDEX IF NOT EXISTS idx_command_status ON TABLE command COLUMNS status CONCURRENTLY;
+DEFINE INDEX IF NOT EXISTS idx_command_task_id ON TABLE command COLUMNS task_id CONCURRENTLY;

@@ -214,7 +214,7 @@ curl http://localhost:5055/health
 docker stats
 
 # Reduce concurrency in .env
-SURREAL_COMMANDS_MAX_TASKS=2
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=2
 ```
 
 **High costs?**

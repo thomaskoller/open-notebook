@@ -27,6 +27,11 @@ The podcast features the following speakers:
   Personality: {{ speaker.personality }}
 {% endfor %}
 </speakers>
+{% if language %}
+
+IMPORTANT LANGUAGE INSTRUCTION: You MUST generate ALL dialogue and content in {{ language }}. Every speaker's dialogue must be written entirely in {{ language }}. Do not use English unless quoting specific English terms. The entire transcript must be in {{ language }}.
+
+{% endif %}
 
 Next, examine the outline produced by our director:
 <outline>

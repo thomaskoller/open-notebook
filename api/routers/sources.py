@@ -16,7 +16,6 @@ from fastapi import (
 from fastapi.responses import FileResponse, Response
 from loguru import logger
 from pydantic import ValidationError
-from surreal_commands import execute_command_sync, submit_command
 
 from api.command_service import CommandService
 from api.credentials_service import validate_url
@@ -31,7 +30,11 @@ from api.models import (
     SourceStatusResponse,
     SourceUpdate,
 )
-from commands.source_commands import SourceProcessingInput
+from commands.source_commands import (
+    SourceProcessingInput,
+    process_source_command,
+)
+from open_notebook.celery_app import effective_status
 from open_notebook.config import UPLOADS_FOLDER
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Notebook, Source
@@ -328,7 +331,10 @@ async def get_sources(
             # Extract status from fetched command object (already resolved by FETCH)
             if command and isinstance(command, dict):
                 command_id = str(command.get("id")) if command.get("id") else None
-                status = command.get("status")
+                # effective_status, not the raw column: a source whose
+                # processing worker died would otherwise show "processing"
+                # forever (the row never gets its terminal transition).
+                status = effective_status(command)
                 # Extract execution metadata from nested result structure
                 result_data = command.get("result")
                 execution_metadata = (
@@ -507,9 +513,6 @@ async def _create_source_async_path(
         await source.add_to_notebook(notebook_id)
 
     try:
-        # Import command modules to ensure they're registered
-        import commands.source_commands  # noqa: F401
-
         # Submit command for background processing
         command_input = SourceProcessingInput(
             source_id=str(source.id),
@@ -568,13 +571,10 @@ async def _create_source_sync_path(
     content_state: dict[str, Any],
     transformation_ids: List[str],
 ) -> SourceResponse:
-    """SYNC PATH: Execute synchronously using execute_command_sync."""
+    """SYNC PATH: run the processing task body inline, in this request."""
     logger.info("Using sync processing path")
 
     try:
-        # Import command modules to ensure they're registered
-        import commands.source_commands  # noqa: F401
-
         # Create source record - let SurrealDB generate the ID
         source = Source(
             title=source_data.title or "Processing...",
@@ -596,19 +596,21 @@ async def _create_source_sync_path(
             embed=source_data.embed,
         )
 
-        # Run in thread pool to avoid blocking the event loop
-        # execute_command_sync uses asyncio.run() internally which can't
-        # be called from an already-running event loop (FastAPI)
-        result = await asyncio.to_thread(
-            execute_command_sync,
-            "open_notebook",  # app name
-            "process_source",  # command name
-            command_input.model_dump(),
-            timeout=300,  # 5 minute timeout for sync processing
-        )
-
-        if not result.is_success():
-            logger.error(f"Sync processing failed: {result.error_message}")
+        # The whole point of this path is that the caller waits for the
+        # result, so await the task body directly rather than publishing to
+        # the broker only to block on the reply. `.impl` is the underlying
+        # async function behind the Celery task (see celery_app.async_task).
+        try:
+            await asyncio.wait_for(
+                process_source_command.impl(command_input), timeout=300
+            )
+        except Exception as exc:
+            message = (
+                "Processing timed out after 300s"
+                if isinstance(exc, asyncio.TimeoutError)
+                else str(exc)
+            )
+            logger.error(f"Sync processing failed: {message}")
             # Clean up source record
             try:
                 await source.delete()
@@ -616,7 +618,7 @@ async def _create_source_sync_path(
                 pass
             raise HTTPException(
                 status_code=500,
-                detail=f"Processing failed: {_truncate_error(result.error_message)}",
+                detail=f"Processing failed: {_truncate_error(message)}",
             )
 
         # Get the processed source
@@ -996,9 +998,6 @@ async def retry_source_processing(source_id: str):
                 )
 
         try:
-            # Import command modules to ensure they're registered
-            import commands.source_commands  # noqa: F401
-
             # Submit new command for background processing
             command_input = SourceProcessingInput(
                 source_id=str(source.id),
@@ -1126,7 +1125,7 @@ async def create_source_insight(source_id: str, request: CreateSourceInsightRequ
             raise HTTPException(status_code=404, detail="Transformation not found")
 
         # Submit transformation as background job (fire-and-forget)
-        command_id = submit_command(
+        command_id = await CommandService.submit_command_job(
             "open_notebook",
             "run_transformation",
             {
@@ -1135,7 +1134,7 @@ async def create_source_insight(source_id: str, request: CreateSourceInsightRequ
             },
         )
         logger.info(
-            f"Submitted run_transformation command {command_id} for source {source_id}"
+            f"Submitted run_transformation job {command_id} for source {source_id}"
         )
 
         # Return immediately with command_id for status tracking

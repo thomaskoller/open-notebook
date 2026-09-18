@@ -39,9 +39,6 @@ async def embed_content(embed_request: EmbedRequest):
             logger.info(f"Using async processing for {item_type} {item_id}")
 
             try:
-                # Import commands to ensure they're registered
-                import commands.embedding_commands  # noqa: F401
-
                 # Submit type-specific command
                 if item_type == "source":
                     command_name = "embed_source"

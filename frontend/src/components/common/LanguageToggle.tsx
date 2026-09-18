@@ -26,10 +26,10 @@ export function LanguageToggle({ iconOnly = false }: LanguageToggleProps) {
         <Button 
           variant={iconOnly ? "ghost" : "outline"} 
           size={iconOnly ? "icon" : "default"} 
-          className={iconOnly ? "h-9 w-full sidebar-menu-item" : "w-full justify-start gap-2 sidebar-menu-item"}
+          className={iconOnly ? "h-9 w-full sidebar-menu-item" : "w-full justify-start gap-2 sidebar-menu-item max-lg:justify-center max-lg:px-2"}
         >
           <Languages className="h-[1.2rem] w-[1.2rem]" />
-          {!iconOnly && <span>{t('common.language')}</span>}
+          {!iconOnly && <span className="max-lg:hidden">{t('common.language')}</span>}
           <span className="sr-only">{t('navigation.language')}</span>
         </Button>
       </DropdownMenuTrigger>

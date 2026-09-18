@@ -157,7 +157,7 @@ docker compose logs api | grep "slow\|timeout"
 ### Reduce Load
 ```bash
 # In .env:
-SURREAL_COMMANDS_MAX_TASKS=2
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=2
 API_CLIENT_TIMEOUT=600
 
 # Restart
@@ -233,21 +233,17 @@ docker compose restart
 
 **Solutions:**
 
-### Enable Retry Logic
-```bash
-# In .env:
-SURREAL_COMMANDS_RETRY_ENABLED=true
-SURREAL_COMMANDS_RETRY_MAX_ATTEMPTS=5
-SURREAL_COMMANDS_RETRY_WAIT_STRATEGY=exponential_jitter
-
-# Restart
-docker compose restart
-```
+### Check the retries that are already happening
+Background tasks retry transient failures automatically with exponential-jitter
+backoff (up to 15 attempts for source processing). Open Flower
+(http://127.0.0.1:5555) and look at a task's retry count: a high count points at
+the provider or the network, not at your configuration. Retry budgets are
+declared per task in `commands/*.py`, not by environment variable.
 
 ### Reduce Concurrency
 ```bash
 # In .env:
-SURREAL_COMMANDS_MAX_TASKS=2
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=2
 
 # Restart
 docker compose restart

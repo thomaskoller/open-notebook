@@ -94,6 +94,10 @@ export function useCreateSource() {
   return useMutation({
     mutationFn: (data: CreateSourceRequest) => sourcesApi.create(data),
     onSuccess: (result: SourceResponse, variables) => {
+      // Wake the jobs poll: it stops entirely while the queue is empty
+      // (see jobsRefetchInterval), so a new job is invisible until something
+      // invalidates this key.
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
       // Invalidate queries for all relevant notebooks with immediate refetch
       if (variables.notebooks) {
         variables.notebooks.forEach(notebookId => {
@@ -216,6 +220,10 @@ export function useFileUpload() {
         queryKey: QUERY_KEYS.sourcesInfinite(variables.notebookId),
         refetchType: 'active'
       })
+      // Wake the jobs poll: it stops entirely while the queue is empty
+      // (see jobsRefetchInterval), so a new job is invisible until something
+      // invalidates this key.
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
       toast({
         title: t('common.success'),
         description: t('sources.fileUploadedSuccess'),
@@ -273,6 +281,10 @@ export function useRetrySource() {
       // Invalidate ALL sources queries to refresh the UI
       queryClient.invalidateQueries({ queryKey: ['sources'] })
       queryClient.invalidateQueries({ queryKey: QUERY_KEYS.source(sourceId) })
+      // Wake the jobs poll: it stops entirely while the queue is empty
+      // (see jobsRefetchInterval), so a new job is invisible until something
+      // invalidates this key.
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
 
       toast({
         title: t('sources.sourceRequeued'),

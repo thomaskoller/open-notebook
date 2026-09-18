@@ -35,4 +35,7 @@ export const QUERY_KEYS = {
   episodeProfiles: ['podcasts', 'episode-profiles'] as const,
   speakerProfiles: ['podcasts', 'speaker-profiles'] as const,
   languages: ['languages'] as const,
+  jobs: (opts: { recent: boolean; limit: number }) =>
+    ['jobs', opts.recent ? 'recent' : 'active', opts.limit] as const,
+  job: (id: string) => ['jobs', id] as const,
 }

@@ -1,4 +1,4 @@
-.PHONY: run frontend check ruff database lint api start-all stop-all status clean-cache worker worker-start worker-stop worker-restart
+.PHONY: run frontend check ruff database redis flower lint api start-all stop-all status clean-cache worker worker-start worker-stop worker-restart
 .PHONY: docker-buildx-prepare docker-buildx-clean docker-buildx-reset
 .PHONY: docker-push docker-push-latest docker-release docker-build-local tag export-docs
 .PHONY: release-test release-stack release-stack-down
@@ -15,6 +15,14 @@ PLATFORMS := linux/amd64,linux/arm64
 
 database:
 	docker compose up -d surrealdb
+
+redis:
+	docker compose up -d redis
+
+# Celery monitoring UI (queue depth, in-flight tasks, retries, worker health)
+flower:
+	@echo "🌸 Flower: http://127.0.0.1:5555"
+	uv run --env-file .env celery -A open_notebook.celery_app:celery flower --address=127.0.0.1 --port=5555
 
 run:
 	@echo "⚠️  Warning: Starting frontend only. For full functionality, use 'make start-all'"
@@ -161,12 +169,12 @@ api:
 worker: worker-start
 
 worker-start:
-	@echo "Starting surreal-commands worker..."
-	uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}"
+	@echo "Starting Celery worker..."
+	uv run --env-file .env celery -A open_notebook.celery_app:celery worker --pool=threads --concurrency="$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}" --loglevel=info
 
 worker-stop:
-	@echo "Stopping surreal-commands worker..."
-	pkill -f "surreal-commands-worker" || true
+	@echo "Stopping Celery worker..."
+	pkill -f "celery -A open_notebook" || true
 
 worker-restart: worker-stop
 	@sleep 2
@@ -175,26 +183,27 @@ worker-restart: worker-stop
 # === Service Management ===
 start-all:
 	@echo "🚀 Starting Open Notebook (Database + API + Worker + Frontend)..."
-	@echo "📊 Starting SurrealDB..."
-	@docker compose -f docker-compose.dev.yml up -d surrealdb
+	@echo "📊 Starting SurrealDB + Redis..."
+	@docker compose up -d surrealdb redis
 	@sleep 3
 	@echo "🔧 Starting API backend..."
 	@uv run run_api.py &
 	@sleep 3
-	@echo "⚙️ Starting background worker..."
-	@uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}" &
+	@echo "⚙️ Starting Celery worker..."
+	@uv run --env-file .env celery -A open_notebook.celery_app:celery worker --pool=threads --concurrency="$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}" --loglevel=info &
 	@sleep 2
 	@echo "🌐 Starting Next.js frontend..."
 	@echo "✅ All services started!"
 	@echo "📱 Frontend: http://localhost:3000"
 	@echo "🔗 API: http://localhost:5055"
 	@echo "📚 API Docs: http://localhost:5055/docs"
+	@echo "🌸 Flower (run 'make flower'): http://127.0.0.1:5555"
 	cd frontend && npm run dev
 
 stop-all:
 	@echo "🛑 Stopping all Open Notebook services..."
 	@pkill -f "next dev" || true
-	@pkill -f "surreal-commands-worker" || true
+	@pkill -f "celery -A open_notebook" || true
 	@pkill -f "run_api.py" || true
 	@pkill -f "uvicorn api.main:app" || true
 	@docker compose down
@@ -204,10 +213,14 @@ status:
 	@echo "📊 Open Notebook Service Status:"
 	@echo "Database (SurrealDB):"
 	@docker compose ps surrealdb 2>/dev/null || echo "  ❌ Not running"
+	@echo "Broker (Redis):"
+	@docker compose ps redis 2>/dev/null || echo "  ❌ Not running"
 	@echo "API Backend:"
 	@pgrep -f "run_api.py\|uvicorn api.main:app" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
-	@echo "Background Worker:"
-	@pgrep -f "surreal-commands-worker" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
+	@echo "Background Worker (Celery):"
+	@pgrep -f "celery -A open_notebook.*worker" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
+	@echo "Flower:"
+	@pgrep -f "celery -A open_notebook.*flower" >/dev/null && echo "  ✅ Running (http://127.0.0.1:5555)" || echo "  ❌ Not running"
 	@echo "Next.js Frontend:"
 	@pgrep -f "next dev" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
 

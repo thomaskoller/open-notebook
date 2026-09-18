@@ -33,15 +33,20 @@ Comprehensive list of all environment variables available in Open Notebook.
 
 ---
 
-## Database: Retry Configuration
+## Job Queue (Celery + Redis)
 
 | Variable | Required? | Default | Description |
 |----------|-----------|---------|-------------|
-| `SURREAL_COMMANDS_RETRY_ENABLED` | No | true | Enable retries on failure |
-| `SURREAL_COMMANDS_RETRY_MAX_ATTEMPTS` | No | 3 | Maximum retry attempts |
-| `SURREAL_COMMANDS_RETRY_WAIT_STRATEGY` | No | exponential_jitter | Retry wait strategy (exponential_jitter/exponential/fixed/random) |
-| `SURREAL_COMMANDS_RETRY_WAIT_MIN` | No | 1 | Minimum wait time between retries (seconds) |
-| `SURREAL_COMMANDS_RETRY_WAIT_MAX` | No | 30 | Maximum wait time between retries (seconds) |
+| `REDIS_URL` | Yes | redis://localhost:6379/0 | Celery broker and result backend. **Background jobs queue forever with no error if this is unreachable.** `docker-compose.yml` points it at the internal `redis` service. |
+| `FLOWER_BASIC_AUTH` | No | *(none)* | `user:password` for the Flower monitoring UI. Flower ships with **no authentication** and can read task arguments and revoke jobs, so it is published on `127.0.0.1:5555` only — set this before exposing it on a network. |
+| `FLOWER_UNAUTHENTICATED_API` | No | false | Allow Flower's JSON API without credentials. Leave off unless you are scripting against it. |
+
+> **Retry policy is not configurable by environment.** Each task declares its own
+> budget in code (`commands/*.py`) because the right policy differs per task:
+> `process_source` retries up to 15 times to outlast SurrealDB transaction
+> conflicts, while `generate_podcast` never retries because a retry would produce
+> a duplicate episode. Validation and configuration errors are never retried.
+> See [ADR-009](../7-DEVELOPMENT/decisions/ADR-009-celery-queue.md).
 
 ---
 
@@ -49,7 +54,13 @@ Comprehensive list of all environment variables available in Open Notebook.
 
 | Variable | Required? | Default | Description |
 |----------|-----------|---------|-------------|
-| `OPEN_NOTEBOOK_WORKER_MAX_TASKS` | No | 5 | Maximum number of background tasks (source processing, embeddings, podcasts) the worker runs concurrently. Passed to the worker as `--max-tasks` at launch. Set to `1` for **sequential processing** on single-GPU or local-LLM setups, where parallel requests overload the model and trigger rate limits. |
+| `OPEN_NOTEBOOK_WORKER_MAX_TASKS` | No | 5 | Maximum number of background tasks (source processing, embeddings, podcasts) the worker runs concurrently. Passed to Celery as `--concurrency` at launch. Set to `1` for **sequential processing** on single-GPU or local-LLM setups, where parallel requests overload the model and trigger rate limits. |
+| `OPEN_NOTEBOOK_JOB_STALE_MINUTES` | No | 30 | How long a queued/running job may go without any update before the API reports it as `unknown` instead of in-progress. A worker killed mid-task (container restart, OOM) never writes its terminal status, so without this its job row counts as in-progress forever. Nothing is written to the database — a job that was merely quiet reappears as active as soon as it reports again — so raise this only if you have tasks that legitimately go silent for longer. |
+
+> The worker runs Celery's **threads** pool: one process running N tasks at once,
+> which keeps memory flat as you raise this number. Switching to `--pool=prefork`
+> gives real parallelism and lets you hard-kill a running task, at the cost of N
+> full copies of the import footprint.
 
 > **Read at worker launch, from the process environment.** In Docker this comes from the container environment — set it under `environment:` in `docker-compose.yml` (or your orchestrator). For local `make worker-start` / `dev-init.sh`, export it in your shell (e.g. `export OPEN_NOTEBOOK_WORKER_MAX_TASKS=1`) — it is consumed by the shell before the app loads `.env`, so a value placed only in `.env` will not apply to these local launch paths.
 
@@ -99,6 +110,8 @@ CORS_ORIGINS=https://notebook.example.com
 |----------|-----------|---------|-------------|
 | `TTS_BATCH_SIZE` | No | 5 | Concurrent TTS requests (1-5, depends on provider) |
 | `ESPERANTO_TTS_TIMEOUT` | No | 300 | Text-to-speech request timeout in seconds (passed through to Esperanto). Increase it for slow or self-hosted TTS providers that take longer than 5 minutes to synthesize a segment, otherwise long podcast segments can fail with a timeout. |
+| `PODCAST_RETRY_MAX_ATTEMPTS` | No | 3 | Attempts per outline/transcript/TTS call. A model that returns malformed JSON is re-sampled; raise this if your provider is flaky. |
+| `PODCAST_RETRY_WAIT_MULTIPLIER` | No | 2 | Exponential backoff multiplier in seconds between those attempts (capped at 30s). |
 
 ---
 
@@ -144,7 +157,7 @@ Route all outbound HTTP requests through a proxy server. Useful for corporate/fi
 
 > **Important:** `NO_PROXY` must list the internal SurrealDB hosts — `host.docker.internal` (Docker) and `surrealdb` (the compose service name). The SurrealDB SDK connects over a websocket, and `websockets` 15.0+ tunnels even `ws://` connections through a configured proxy, which then rejects the internal host with **HTTP 403** and prevents the API and worker from starting. Open Notebook injects `host.docker.internal,surrealdb,localhost,127.0.0.1` into `NO_PROXY` automatically at startup as a safety net, but you should still set them explicitly.
 
-The underlying libraries (esperanto, content-core, podcast-creator) automatically detect proxy settings from these standard environment variables.
+The underlying libraries (esperanto, content-core) automatically detect proxy settings from these standard environment variables.
 
 **Affects:**
 - AI provider API calls (OpenAI, Anthropic, Google, Groq, etc.)
@@ -164,7 +177,7 @@ HTTP_PROXY=http://user:password@proxy.corp.com:8080
 HTTPS_PROXY=http://user:password@proxy.corp.com:8080
 
 # Bypass proxy for local hosts (include the internal DB hosts!)
-NO_PROXY=localhost,127.0.0.1,host.docker.internal,surrealdb,.local
+NO_PROXY=localhost,127.0.0.1,host.docker.internal,surrealdb,redis,.local
 ```
 
 ---
@@ -215,13 +228,13 @@ API_URL=https://mynotebook.example.com
 OPEN_NOTEBOOK_ENCRYPTION_KEY=your-secret-key
 HTTP_PROXY=http://proxy.corp.com:8080
 HTTPS_PROXY=http://proxy.corp.com:8080
-NO_PROXY=localhost,127.0.0.1,host.docker.internal,surrealdb,.local
+NO_PROXY=localhost,127.0.0.1,host.docker.internal,surrealdb,redis,.local
 ```
 
 ### High-Performance Deployment
 ```
 OPEN_NOTEBOOK_ENCRYPTION_KEY=your-secret-key
-SURREAL_COMMANDS_MAX_TASKS=10
+OPEN_NOTEBOOK_WORKER_MAX_TASKS=10
 TTS_BATCH_SIZE=5
 API_CLIENT_TIMEOUT=600
 ```

@@ -113,7 +113,7 @@ class TestPodcastServiceDoesNotLeakExceptionText:
         from api.podcast_service import PodcastService
 
         with patch(
-            "api.podcast_service.get_command_status",
+            "api.podcast_service.CommandService.get_command_status",
             new=AsyncMock(side_effect=RuntimeError(SECRET)),
         ):
             with pytest.raises(HTTPException) as exc_info:

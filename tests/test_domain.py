@@ -5,10 +5,9 @@ This test suite focuses on validation logic, business rules, and data structures
 that can be tested without database mocking.
 """
 
-import sys
 import tempfile
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -388,11 +387,12 @@ class TestSourceDomain:
         """Test that vectorize() submits embed_source command when text is valid."""
         source = Source(id="source:test_valid", title="Test", full_text="Real content")
         with patch(
-            "open_notebook.domain.notebook.submit_command", return_value="command:123"
+            "open_notebook.domain.notebook.submit_job",
+            new_callable=AsyncMock,
+            return_value="command:123",
         ) as mock_submit:
             result = await source.vectorize()
-            mock_submit.assert_called_once_with(
-                "open_notebook",
+            mock_submit.assert_awaited_once_with(
                 "embed_source",
                 {"source_id": "source:test_valid"},
             )
@@ -518,17 +518,9 @@ class TestPodcastService:
         async def fake_get_for_sources(cls, source_ids):
             return {sid: [] for sid in source_ids}
 
-        def fake_submit_command(app_name, command_name, command_args):
+        async def fake_submit_command_job(app_name, command_name, command_args):
             submitted_args.update(command_args)
             return "command:podcast"
-
-        fake_commands_module = ModuleType("commands.podcast_commands")
-        # The real commands/__init__.py runs `from .podcast_commands import
-        # generate_podcast_command` when the package is imported, so the fake
-        # submodule must expose that name or the package import fails before the
-        # patched submit_command is reached.
-        # setattr: dynamic module attribute mypy can't know about
-        setattr(fake_commands_module, "generate_podcast_command", lambda *a, **k: None)
 
         with (
             patch.object(
@@ -549,9 +541,9 @@ class TestPodcastService:
             patch.object(
                 SourceInsight, "get_for_sources", new=classmethod(fake_get_for_sources)
             ),
-            patch("api.podcast_service.submit_command", new=fake_submit_command),
-            patch.dict(
-                sys.modules, {"commands.podcast_commands": fake_commands_module}
+            patch(
+                "api.podcast_service.CommandService.submit_command_job",
+                new=fake_submit_command_job,
             ),
         ):
             job_id = await PodcastService.submit_generation_job(

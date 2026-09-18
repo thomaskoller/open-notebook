@@ -42,7 +42,8 @@ class TestNoteSaveEmbedResilience:
                 new=AsyncMock(),
             ),
             patch(
-                "open_notebook.domain.notebook.submit_command",
+                "open_notebook.domain.notebook.submit_job",
+                new_callable=AsyncMock,
                 side_effect=RuntimeError("job queue is down"),
             ),
         ):
@@ -62,7 +63,8 @@ class TestNoteSaveEmbedResilience:
                 new=AsyncMock(),
             ) as mock_super_save,
             patch(
-                "open_notebook.domain.notebook.submit_command",
+                "open_notebook.domain.notebook.submit_job",
+                new_callable=AsyncMock,
                 side_effect=RuntimeError("job queue is down"),
             ),
         ):
@@ -77,7 +79,8 @@ class TestNoteSaveEmbedResilience:
         with (
             patch("open_notebook.domain.base.ObjectModel.save", new=AsyncMock()),
             patch(
-                "open_notebook.domain.notebook.submit_command",
+                "open_notebook.domain.notebook.submit_job",
+                new_callable=AsyncMock,
                 return_value="command:xyz789",
             ),
         ):
@@ -92,7 +95,8 @@ class TestNoteSaveEmbedResilience:
         with (
             patch("open_notebook.domain.base.ObjectModel.save", new=AsyncMock()),
             patch(
-                "open_notebook.domain.notebook.submit_command"
+                "open_notebook.domain.notebook.submit_job",
+                new_callable=AsyncMock,
             ) as mock_submit,
         ):
             object.__setattr__(note, "id", "note:abc123")

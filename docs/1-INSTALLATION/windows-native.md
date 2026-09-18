@@ -24,6 +24,7 @@ This guide documents how to install and run [Open Notebook](https://github.com/l
 | Node.js 18+  | `winget install OpenJS.NodeJS`   | Yes      |
 | uv           | `pip install uv`                 | Yes      |
 | SurrealDB    | `scoop install surrealdb`        | Yes      |
+| Redis        | `scoop install redis` (or Memurai / a remote Redis) | Yes — Celery broker |
 
 ## Quick Start
 
@@ -64,15 +65,25 @@ This guide documents how to install and run [Open Notebook](https://github.com/l
    REM Terminal 2 — API
    uv run --env-file .env run_api.py
 
-   REM Terminal 3 — Worker (module form avoids the Windows "canonicalize" error, see Issue 3)
-   set PYTHONPATH=%CD%
-   uv run --env-file .env python -m surreal_commands.cli.worker --import-modules commands
+   REM Terminal 3 — Redis (Celery broker; background jobs never run without it)
+   redis-server
 
-   REM Terminal 4 — Frontend
+   REM Terminal 4 — Worker. --pool=threads is required on Windows: Celery's
+   REM default prefork pool does not work there.
+   set PYTHONPATH=%CD%
+   uv run --env-file .env celery -A open_notebook.celery_app:celery worker --pool=threads --concurrency=5 --loglevel=info
+
+   REM Terminal 5 — Frontend
    cd frontend && npm run dev
+
+   REM Optional — Flower (job monitoring at http://127.0.0.1:5555)
+   uv run --env-file .env celery -A open_notebook.celery_app:celery flower --address=127.0.0.1 --port=5555
    ```
 
 4. **Open the app:** http://127.0.0.1:3000
+
+> `.env` must contain `REDIS_URL=redis://127.0.0.1:6379/0`. Without a reachable
+> Redis, source processing, embeddings and podcasts queue forever with no error.
 
 ## Directory Structure (Recommended)
 
@@ -109,8 +120,9 @@ set PYTHONPATH=%ROOT%
 cd /d %ROOT%
 
 start "SurrealDB" surreal start --user root --pass root --bind 127.0.0.1:8000 rocksdb:%DATA_ROOT%\surrealdb
+start "Redis" cmd /k "redis-server"
 start "API" cmd /k "uv run --env-file .env run_api.py"
-start "Worker" cmd /k "uv run --env-file .env python -m surreal_commands.cli.worker --import-modules commands"
+start "Worker" cmd /k "uv run --env-file .env celery -A open_notebook.celery_app:celery worker --pool=threads --concurrency=5 --loglevel=info"
 start "Frontend" cmd /k "cd /d %ROOT%\frontend && npm run dev"
 ```
 
@@ -162,22 +174,24 @@ SURREAL_URL="ws://localhost:8000/rpc"
 SURREAL_URL="ws://127.0.0.1:8000/rpc"
 ```
 
-### Issue 3: Worker "Failed to canonicalize script path"
+### Issue 3: Worker starts but no task ever runs
 
-**Symptom:**
+**Symptom:** The worker banner appears, but sources stay "Processing..." forever
+and Flower shows no tasks.
 
-```
-Failed to canonicalize script path
-```
+**Cause:** Celery's default prefork pool does not work on Windows, and the
+worker cannot import the `commands` package unless the project root is on
+`PYTHONPATH`.
 
-**Cause:** The `surreal-commands-worker.exe` can't find the Python `commands` module.
-
-**Solution:** Use Python module invocation with PYTHONPATH:
+**Solution:** Use the threads pool and set PYTHONPATH:
 
 ```batch
 set PYTHONPATH=%ROOT%
-uv run --env-file .env python -m surreal_commands.cli.worker --import-modules commands
+uv run --env-file .env celery -A open_notebook.celery_app:celery worker --pool=threads --concurrency=5 --loglevel=info
 ```
+
+The banner should list 8 `open_notebook.*` tasks. If it lists none, `PYTHONPATH`
+is wrong. If it cannot connect, check `REDIS_URL` and that `redis-server` is up.
 
 ### Issue 4: DATA_FOLDER Path Parsing Error
 

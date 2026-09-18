@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-07 (retroactive record — decision dates from the async rework)
-- **Related**: #381, [ADR-001](ADR-001-surrealdb.md), [podcasts.md](../podcasts.md)
+- **Related**: #381, [ADR-001](ADR-001-surrealdb.md), [ADR-009](ADR-009-celery-queue.md), [podcasts.md](../podcasts.md)
 
 ## Context
 
@@ -12,7 +12,7 @@ Open Notebook routinely processes work that takes seconds to minutes: ingesting 
 
 **Long-running operations run as background jobs on a dedicated worker process, never inline in the API request cycle.** Submission is fire-and-forget (returns a job id immediately), status is observable (`/commands/{id}`), failures are explicit (permanent vs. retriable), and the UI polls or resumes rather than blocking.
 
-The *queue implementation* is deliberately an implementation detail behind this decision. Today it's [surreal-commands](https://github.com/lfnovo/surreal-commands) — chosen because it reuses the SurrealDB we already run, adding zero infrastructure for self-hosters ([ADR-001](ADR-001-surrealdb.md)). A move to Celery is under evaluation as part of the Platform v-next cluster (#381); if it happens, it replaces the implementation, not this decision.
+The *queue implementation* is deliberately an implementation detail behind this decision. It was originally [surreal-commands](https://github.com/lfnovo/surreal-commands) — chosen because it reused the SurrealDB we already run, adding zero infrastructure for self-hosters ([ADR-001](ADR-001-surrealdb.md)). It is now **Celery + Redis**, with Flower for observability ([ADR-009](ADR-009-celery-queue.md)). That swap replaced the implementation; the decision on this page still stands.
 
 ## Alternatives considered
 

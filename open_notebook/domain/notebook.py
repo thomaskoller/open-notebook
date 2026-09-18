@@ -5,9 +5,9 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from surreal_commands import submit_command
 from surrealdb import RecordID
 
+from open_notebook.celery_app import effective_status, get_job, submit_job
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import (
@@ -413,7 +413,7 @@ class Source(ObjectModel):
     full_text: Optional[str] = None
     last_viewed_at: Optional[datetime] = None
     command: Optional[Union[str, RecordID]] = Field(
-        default=None, description="Link to surreal-commands processing job"
+        default=None, description="Link to the background processing job"
     )
 
     @field_validator("command", mode="before")
@@ -440,10 +440,8 @@ class Source(ObjectModel):
             return None
 
         try:
-            from surreal_commands import get_command_status
-
-            status = await get_command_status(str(self.command))
-            return status.status if status else "unknown"
+            job = await get_job(str(self.command))
+            return effective_status(job) if job else "unknown"
         except Exception as e:
             logger.warning(f"Failed to get command status for {self.command}: {e}")
             return "unknown"
@@ -454,24 +452,17 @@ class Source(ObjectModel):
             return None
 
         try:
-            from surreal_commands import get_command_status
-
-            status_result = await get_command_status(str(self.command))
-            if not status_result:
+            job = await get_job(str(self.command))
+            if not job:
                 return None
 
-            # Extract execution metadata if available
-            result = getattr(status_result, "result", None)
-            execution_metadata = (
-                result.get("execution_metadata", {}) if isinstance(result, dict) else {}
-            )
-
             return {
-                "status": status_result.status,
-                "started_at": execution_metadata.get("started_at"),
-                "completed_at": execution_metadata.get("completed_at"),
-                "error": getattr(status_result, "error_message", None),
-                "result": result,
+                "status": effective_status(job),
+                "started_at": job.get("started_at"),
+                "completed_at": job.get("completed_at"),
+                "error": job.get("error_message"),
+                "progress": job.get("progress"),
+                "result": job.get("result"),
             }
         except Exception as e:
             logger.warning(f"Failed to get command progress for {self.command}: {e}")
@@ -557,12 +548,8 @@ class Source(ObjectModel):
             if not self.full_text or not self.full_text.strip():
                 raise ValueError(f"Source {self.id} has no text to vectorize")
 
-            # Submit the embed_source command
-            command_id = submit_command(
-                "open_notebook",
-                "embed_source",
-                {"source_id": str(self.id)},
-            )
+            # Submit the embed_source job
+            command_id = await submit_job("embed_source", {"source_id": str(self.id)})
 
             command_id_str = str(command_id)
             logger.info(
@@ -602,7 +589,7 @@ class Source(ObjectModel):
             InvalidInputError: If insight_type or content is empty
             DatabaseOperationError: If submitting the command fails. Matches
                 vectorize()'s contract - callers (transformation.py, source.py)
-                run inside surreal-commands jobs whose outer exception
+                run inside Celery jobs whose outer exception
                 handling already retries transient failures, so a swallowed
                 submission failure here previously meant a transformation
                 could report success while the insight was silently never
@@ -612,10 +599,9 @@ class Source(ObjectModel):
             raise InvalidInputError("Insight type and content must be provided")
 
         try:
-            # Submit create_insight command (fire-and-forget)
-            # Command handles retries internally for transaction conflicts
-            command_id = submit_command(
-                "open_notebook",
+            # Submit create_insight job (fire-and-forget)
+            # The task handles retries internally for transaction conflicts
+            command_id = await submit_job(
                 "create_insight",
                 {
                     "source_id": str(self.id),
@@ -719,12 +705,8 @@ class Note(ObjectModel):
         # save with a 500. Best-effort: log and move on.
         if self.id and self.content and self.content.strip():
             try:
-                command_id = submit_command(
-                    "open_notebook",
-                    "embed_note",
-                    {"note_id": str(self.id)},
-                )
-                logger.debug(f"Submitted embed_note command {command_id} for {self.id}")
+                command_id = await submit_job("embed_note", {"note_id": str(self.id)})
+                logger.debug(f"Submitted embed_note job {command_id} for {self.id}")
                 return command_id
             except Exception as e:
                 logger.error(f"Failed to submit embed_note command for {self.id}: {e}")

@@ -177,7 +177,7 @@ these while the backlog is migrated; do not newly route feature proposals into I
 - `upstream` — root cause lives in one of our libraries, not this repo
 
 **Ecosystem** — issues whose real home is an upstream library:
-- `esperanto` (model abstraction) · `content-core` (content extraction) · `podcast-creator` (podcast generation)
+- `esperanto` (model abstraction) · `content-core` (content extraction)
 
 **Community:**
 - `good first issue` — small, well-scoped, newcomer-friendly

@@ -97,6 +97,10 @@ export function useRetryPodcastEpisode() {
     mutationFn: (episodeId: string) => podcastsApi.retryEpisode(episodeId),
     onSuccess: async () => {
       await queryClient.refetchQueries({ queryKey: QUERY_KEYS.podcastEpisodes })
+      // Wake the jobs poll: it stops entirely while the queue is empty
+      // (see jobsRefetchInterval), so a new job is invisible until something
+      // invalidates this key.
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
       toast({
         title: t('podcasts.retryStarted'),
         description: t('podcasts.retryStartedDesc'),
@@ -399,6 +403,10 @@ export function useGeneratePodcast() {
     onSuccess: async (response) => {
       // Immediately refetch to show the new episode
       await queryClient.refetchQueries({ queryKey: QUERY_KEYS.podcastEpisodes })
+      // Wake the jobs poll: it stops entirely while the queue is empty
+      // (see jobsRefetchInterval), so a new job is invisible until something
+      // invalidates this key.
+      queryClient.invalidateQueries({ queryKey: ['jobs'] })
       toast({
         title: t('podcasts.generationStarted'),
         description: t('podcasts.generationStartedDesc', { name: response.episode_name }),

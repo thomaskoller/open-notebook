@@ -21,6 +21,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { JobsIndicator } from '@/components/jobs/JobsIndicator'
 import { ThemeToggle } from '@/components/common/ThemeToggle'
 import { LanguageToggle } from '@/components/common/LanguageToggle'
 import type { TFunction } from 'i18next'
@@ -105,10 +106,15 @@ export function AppSidebar() {
 
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
   const [isMac, setIsMac] = useState(true) // Default to Mac for SSR
+  // The collapse state is persisted (zustand `persist`), so the first paint is
+  // always the un-persisted default. Animating from it means every page load
+  // plays a 300ms open->closed sweep. Snap to the right width, animate after.
+  const [mounted, setMounted] = useState(false)
 
   // Detect platform for keyboard shortcut display
   useEffect(() => {
     setIsMac(navigator.platform.toLowerCase().includes('mac'))
+    setMounted(true)
   }, [])
 
   const handleCreateSelection = (target: CreateTarget) => {
@@ -127,14 +133,17 @@ export function AppSidebar() {
     <TooltipProvider delayDuration={0}>
       <div
         className={cn(
-          'app-sidebar flex h-full flex-col bg-sidebar border-sidebar-border border-r transition-all duration-300',
-          isCollapsed ? 'w-16' : 'w-64'
+          'app-sidebar flex h-full flex-col bg-sidebar border-sidebar-border border-r',
+          mounted && 'transition-all duration-300',
+          // Below `lg` the rail is forced regardless of the stored state - 256px
+          // of a phone screen is not ours to take. Pure CSS, so no SSR flash.
+          isCollapsed ? 'w-16' : 'w-64 max-lg:w-16'
         )}
       >
         <div
           className={cn(
-            'flex h-16 items-center group',
-            isCollapsed ? 'justify-center px-2' : 'justify-between px-4'
+            'flex h-16 shrink-0 items-center group',
+            isCollapsed ? 'justify-center px-2' : 'justify-between px-4 max-lg:justify-center max-lg:px-2'
           )}
         >
           {isCollapsed ? (
@@ -153,7 +162,7 @@ export function AppSidebar() {
             <>
               <div className="flex items-center gap-2.5">
                 <LogoPebbles />
-                <span className="font-display text-[15px] font-bold tracking-tight text-sidebar-foreground">
+                <span className="font-display text-[15px] font-bold tracking-tight text-sidebar-foreground max-lg:hidden">
                   {t('common.appName')}
                 </span>
               </div>
@@ -161,7 +170,7 @@ export function AppSidebar() {
                 variant="ghost"
                 size="sm"
                 onClick={toggleCollapse}
-                className="text-sidebar-foreground hover:bg-sidebar-accent"
+                className="text-sidebar-foreground hover:bg-sidebar-accent max-lg:hidden"
                 data-testid="sidebar-toggle"
               >
                 <ChevronLeft className="h-4 w-4" />
@@ -172,7 +181,7 @@ export function AppSidebar() {
 
         <nav
           className={cn(
-            'flex-1 space-y-1 py-4',
+            'flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-1 py-4',
             isCollapsed ? 'px-2' : 'px-3'
           )}
         >
@@ -206,10 +215,11 @@ export function AppSidebar() {
                     onClick={() => setCreateMenuOpen(true)}
                     variant="default"
                     size="sm"
-                    className="w-full justify-start font-display font-bold"
+                    className="w-full justify-start font-display font-bold max-lg:justify-center max-lg:px-2"
+                    aria-label={t('common.create')}
                    >
-                    <Plus className="h-4 w-4 mr-2" />
-                    {t('common.create')}
+                    <Plus className="h-4 w-4 mr-2 max-lg:mr-0" />
+                    <span className="max-lg:hidden">{t('common.create')}</span>
                   </Button>
                 </DropdownMenuTrigger>
               )}
@@ -260,7 +270,7 @@ export function AppSidebar() {
               )}
               <div className="space-y-1">
                 {!isCollapsed && (
-                  <h3 className="mb-1.5 px-3 text-[10.5px] font-bold uppercase tracking-[0.14em] text-sidebar-foreground/40">
+                  <h3 className="mb-1.5 px-3 text-[10.5px] font-bold uppercase tracking-[0.14em] text-sidebar-foreground/40 max-lg:hidden">
                     {section.title}
                   </h3>
                 )}
@@ -274,11 +284,12 @@ export function AppSidebar() {
                         'w-full gap-2.5 text-[13px] font-medium text-sidebar-foreground/80 sidebar-menu-item relative',
                         isActive &&
                           'bg-popover font-semibold text-sidebar-foreground ring-1 ring-inset ring-border before:absolute before:-left-1.5 before:top-[7px] before:bottom-[7px] before:w-[3px] before:rounded-[2px] before:bg-fern',
-                        isCollapsed ? 'justify-center px-2' : 'justify-start'
+                        isCollapsed ? 'justify-center px-2' : 'justify-start max-lg:justify-center max-lg:px-2'
                       )}
+                      aria-label={item.name}
                     >
-                      <item.icon className={cn('h-4 w-4 opacity-85', item.iconClass)} />
-                      {!isCollapsed && <span>{item.name}</span>}
+                      <item.icon className={cn('h-4 w-4 shrink-0 opacity-85', item.iconClass)} />
+                      {!isCollapsed && <span className="max-lg:hidden">{item.name}</span>}
                     </Button>
                   )
 
@@ -308,13 +319,13 @@ export function AppSidebar() {
 
         <div
           className={cn(
-            'border-t border-sidebar-border p-3 space-y-2',
+            'border-t border-sidebar-border shrink-0 p-3 space-y-2',
             isCollapsed && 'px-2'
           )}
         >
           {/* Command Palette hint */}
           {!isCollapsed && (
-            <div className="px-3 py-1.5 text-xs text-sidebar-foreground/60">
+            <div className="px-3 py-1.5 text-xs text-sidebar-foreground/60 max-lg:hidden">
               <div className="flex items-center justify-between">
                  <span className="flex items-center gap-1.5">
                   <Command className="h-3 w-3" />
@@ -329,6 +340,8 @@ export function AppSidebar() {
               </p>
             </div>
           )}
+
+          <JobsIndicator isCollapsed={isCollapsed} />
 
            <div
             className={cn(
@@ -380,12 +393,12 @@ export function AppSidebar() {
           ) : (
             <Button
               variant="outline"
-              className="w-full justify-start gap-2 sidebar-menu-item"
+              className="w-full justify-start gap-2 sidebar-menu-item max-lg:justify-center max-lg:px-2"
               onClick={logout}
               aria-label={t('common.signOut')}
              >
-              <LogOut className="h-4 w-4" />
-              {t('common.signOut')}
+              <LogOut className="h-4 w-4 shrink-0" />
+              <span className="max-lg:hidden">{t('common.signOut')}</span>
             </Button>
           )}
         </div>

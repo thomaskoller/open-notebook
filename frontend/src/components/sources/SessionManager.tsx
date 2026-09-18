@@ -120,7 +120,7 @@ export function SessionManager({
           </CardTitle>
         </CardHeader>
         <CardContent className="flex-1 p-0 min-h-0">
-          <ScrollArea className="h-full px-4">
+          <ScrollArea className="h-[50vh] px-4">
             {isCreating && (
               <div className="p-3 border rounded-lg mb-3">
                 <Input
